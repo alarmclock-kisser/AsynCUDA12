@@ -196,11 +196,12 @@ namespace AsynCUDA12.Runtime
 
 			try
 			{
-				CUdeviceptr devicePtr = new(pointer);
+			CUdeviceptr devicePtr = new(pointer);
 
-				CUdeviceptr outputPtr = new(this.Register.AllocateSingle<byte>(width * height * ((channels * bitdepth) / 8))?.IndexPointer ?? IntPtr.Zero);
+			// For image kernels that operate in-place, reuse the input buffer as the output buffer
+			CUdeviceptr outputPtr = devicePtr;
 
-				object[] kernelArgs = this.Compiler.MergeArgumentsImage(devicePtr, outputPtr, width, height, channels, bitdepth, arguments);
+			object[] kernelArgs = this.Compiler.MergeArgumentsImage(devicePtr, outputPtr, width, height, channels, bitdepth, arguments);
 
 				int totalThreadsX = width;
 				int totalThreadsY = height;
@@ -218,14 +219,9 @@ namespace AsynCUDA12.Runtime
 
 				CudaLogger.Log($"Kernel executed '{this.KernelName ?? "N/A"}'");
 
-				if (outputPtr.Pointer != 0)
-				{
-					this.Register.FreeMemory(devicePtr.Pointer);
-				}
-
 				this.Context.Synchronize();
 
-				return outputPtr.Pointer != 0 ? outputPtr.Pointer : pointer;
+				return pointer;
 			}
 			catch (Exception ex)
 			{

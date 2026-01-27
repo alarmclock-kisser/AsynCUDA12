@@ -23,7 +23,7 @@ namespace alarmclockkisser.ImageHandling
 		public float SizeMb => this.SizeInBytes / (1024f * 1024f);
 		public string DataType => "byte";
 		public string DataStructure => "[]";
-		public string Base64Image => this.AsBase64Image().Result;
+		public string Base64Image => this.AsBase64ImageAsync().Result;
 
 		public long Pointer { get; set; } = nint.Zero;
 		public string PointerHex => this.Pointer == nint.Zero ? "0" : this.Pointer.ToString("X");
@@ -109,7 +109,7 @@ namespace alarmclockkisser.ImageHandling
 			}
 		}
 
-		public async Task<string> AsBase64Image(string format = "bmp")
+		public async Task<string> AsBase64ImageAsync(string format = "bmp")
 		{
 			if (this.Img == null)
 			{
@@ -138,7 +138,7 @@ namespace alarmclockkisser.ImageHandling
 			}
 		}
 
-		public async Task<IEnumerable<byte>> GetBytes(bool keepImage = false)
+		public async Task<IEnumerable<byte>> GetBytesAsync(bool keepImage = false)
 		{
 			if (this.Img == null)
 			{
@@ -171,7 +171,7 @@ namespace alarmclockkisser.ImageHandling
 			return bytes.AsEnumerable();
 		}
 
-		public async Task<Image<Rgba32>?> SetImage(IEnumerable<byte> bytes, bool keepPointer = false)
+		public async Task<Image<Rgba32>?> SetImageAsync(IEnumerable<byte> bytes, bool keepPointer = false)
 		{
 			if (this.Img != null)
 			{
@@ -256,7 +256,7 @@ namespace alarmclockkisser.ImageHandling
 			GC.SuppressFinalize(this);
 		}
 
-		public async Task<string> Export(string filePath = "", string format = "bmp")
+		public async Task<string> ExportAsync(string filePath = "", string format = "bmp")
 		{
 			if (this.Img == null)
 			{

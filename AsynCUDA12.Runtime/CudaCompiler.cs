@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Threading;
 
 namespace AsynCUDA12.Runtime
 {
@@ -111,6 +112,29 @@ namespace AsynCUDA12.Runtime
 			return fallbackPath;
 		}
 
+		private static byte[] ReadAllBytesWithRetry(string path, int retries = 3, int delayMs = 50)
+		{
+			for (int attempt = 0; attempt <= retries; attempt++)
+			{
+				try
+				{
+					using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+					using MemoryStream ms = new();
+					stream.CopyTo(ms);
+					return ms.ToArray();
+				}
+				catch (IOException) when (attempt < retries)
+				{
+					Thread.Sleep(delayMs);
+				}
+			}
+
+			using FileStream finalStream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+			using MemoryStream finalMs = new();
+			finalStream.CopyTo(finalMs);
+			return finalMs.ToArray();
+		}
+
 
 
 
@@ -205,7 +229,7 @@ namespace AsynCUDA12.Runtime
 			try
 			{
 				// Load ptx code
-				byte[] ptxCode = File.ReadAllBytes(ptxPath);
+				byte[] ptxCode = ReadAllBytesWithRetry(ptxPath);
 
 				// Load kernel
 				this.Kernel = this.Context.LoadKernelPTX(ptxCode, displayName);

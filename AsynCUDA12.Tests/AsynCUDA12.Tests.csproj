@@ -24,6 +24,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\AsynCUDA12.Core\AsynCUDA12.Core.csproj" />
     <ProjectReference Include="..\AsynCUDA12.Runtime\AsynCUDA12.Runtime.csproj" />
   </ItemGroup>
 

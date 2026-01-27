@@ -1,4 +1,5 @@
-﻿using AsynCUDA12.Runtime;
+﻿using alarmclockkisser.ImageHandling;
+using AsynCUDA12.Runtime;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -257,6 +258,102 @@ namespace AsynCUDA12.Tests
 
 
 
+		// Image
+		[TestMethod]
+		public async Task LaunchKernel_Image_ValidInput_ShouldReturnInvertedImage()
+		{
+			// Compile source & verify
+			Assert.IsNotNull(this.Service.Launcher);
+			Assert.IsNotNull(this.Service.Compiler);
+			string? ptxPath = this.Service.Compiler.CompileString(ValidKernelSourceImage);
+			Assert.IsNotNull(ptxPath, "Compilation failed for valid source code.");
+
+			// Resource image
+			ImageCollection collection = new(loadResources: true);
+
+			// Prepare input data (push bytes)
+			byte[] sourceData = (await collection.Images.First().GetBytesAsync()).ToArray();
+			int width = collection.Images.First().Width;
+			int height = collection.Images.First().Height;
+			int channels = collection.Images.First().Channels;
+
+			byte[] inputData;
+			if (channels == 4)
+			{
+				inputData = new byte[width * height * 3];
+				for (int i = 0, dst = 0; i < width * height; i++)
+				{
+					int src = i * 4;
+					inputData[dst++] = sourceData[src];
+					inputData[dst++] = sourceData[src + 1];
+					inputData[dst++] = sourceData[src + 2];
+				}
+			}
+			else
+			{
+				inputData = sourceData;
+			}
+
+			CudaMem? mem = await this.Service.PushDataAsync(inputData);
+			Assert.IsNotNull(mem, "Failed to allocate device memory.");
+			
+			// Launch kernel
+			IntPtr? resultPtr = await this.Service.Launcher.ExecuteImageKernelAsync(ptxPath, mem.IndexPointer, [], width, height);
+			Assert.IsNotNull(resultPtr, "Kernel execution failed.");
+			
+			// Copy result back to host
+			byte[]? outputData = await this.Service.PullDataAsync<byte>(mem);
+			Assert.IsNotNull(outputData, "Failed to pull data from device.");
+
+			// Verify results
+			for (int i = 0; i < inputData.Length; i++)
+			{
+				Assert.AreEqual((byte) (255 - inputData[i]), outputData[i], $"Mismatch at index {i}");
+			}
+
+			// Clean up
+			this.Service.FreeMemory(mem);
+		}
+
+		[TestMethod]
+		public async Task LaunchKernel_Image_ValidInput_ShouldReturnInvertedImage_Async()
+		{
+			// Compile source & verify
+			Assert.IsNotNull(this.Service.Launcher);
+			Assert.IsNotNull(this.Service.Compiler);
+			string? ptxPath = this.Service.Compiler.CompileString(ValidKernelSourceImage);
+			Assert.IsNotNull(ptxPath, "Compilation failed for valid source code.");
+			// Prepare input data (simple gradient image)
+			int width = 16;
+			int height = 16;
+			int channels = 3;
+			byte[] inputData = new byte[width * height * channels];
+			for (int y = 0; y < height; y++)
+			{
+				for (int x = 0; x < width; x++)
+				{
+					int idx = (y * width + x) * channels;
+					inputData[idx] = (byte)(x * 16);       // R
+					inputData[idx + 1] = (byte)(y * 16);   // G
+					inputData[idx + 2] = (byte)((x + y) * 8); // B
+				}
+			}
+			CudaMem? mem = await this.Service.PushDataAsync(inputData);
+			Assert.IsNotNull(mem, "Failed to allocate device memory.");
+			// Launch kernel
+			IntPtr? resultPtr = await this.Service.Launcher.ExecuteImageKernelAsync(ptxPath, mem.IndexPointer, [], width, height);
+			Assert.IsNotNull(resultPtr, "Kernel execution failed.");
+			// Copy result back to host
+			byte[]? outputData = await this.Service.PullDataAsync<byte>(mem);
+			Assert.IsNotNull(outputData, "Failed to pull data from device.");
+			// Verify results
+			for (int i = 0; i < inputData.Length; i++)
+			{
+				Assert.AreEqual((byte)(255 - inputData[i]), outputData[i], $"Mismatch at index {i}");
+			}
+			// Clean up
+			this.Service.FreeMemory(mem);
+		}
 
 	}
 }

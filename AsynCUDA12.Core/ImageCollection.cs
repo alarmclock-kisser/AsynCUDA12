@@ -363,7 +363,7 @@ namespace alarmclockkisser.ImageHandling
             ImageObj? obj = this[guid];
             if (obj != null)
             {
-                return await obj.Export(exportPath, format);
+                return await obj.ExportAsync(exportPath, format);
             }
 
             return null;
