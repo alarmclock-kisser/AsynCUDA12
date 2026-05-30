@@ -1,10 +1,8 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.14.36804.6
+# Visual Studio Version 18
+VisualStudioVersion = 18.6.11822.322 stable
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AsynCUDA12.Forms", "AsynCUDA12.Forms\AsynCUDA12.Forms.csproj", "{F7A859B0-D179-4837-86F7-BDA1045F0CB9}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AsynCUDA12.Runtime", "AsynCUDA12.Runtime\AsynCUDA12.Runtime.csproj", "{5242659F-B9B6-4C4B-AB77-CC5CE4140795}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AsynCUDA12.Tests", "AsynCUDA12.Tests\AsynCUDA12.Tests.csproj", "{77C9994E-2521-49AB-9023-05AEB4676EC1}"
@@ -17,10 +15,6 @@ Global
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{F7A859B0-D179-4837-86F7-BDA1045F0CB9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{F7A859B0-D179-4837-86F7-BDA1045F0CB9}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{F7A859B0-D179-4837-86F7-BDA1045F0CB9}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{F7A859B0-D179-4837-86F7-BDA1045F0CB9}.Release|Any CPU.Build.0 = Release|Any CPU
 		{5242659F-B9B6-4C4B-AB77-CC5CE4140795}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{5242659F-B9B6-4C4B-AB77-CC5CE4140795}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{5242659F-B9B6-4C4B-AB77-CC5CE4140795}.Release|Any CPU.ActiveCfg = Release|Any CPU
