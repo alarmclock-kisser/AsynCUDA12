@@ -17,7 +17,11 @@ namespace AsynCUDA12.Runtime
 		private CudaRegister Register;
 
 
-		// Ctor
+		/// <summary>
+		/// Initializes a new instance of the <see cref="CudaFourier"/> class.
+		/// </summary>
+		/// <param name="ctx">The CUDA primary context.</param>
+		/// <param name="register">The <see cref="CudaRegister"/> to use for memory management.</param>
 		internal CudaFourier(PrimaryContext ctx, CudaRegister register)
 		{
 			this.CTX = ctx;
@@ -25,7 +29,12 @@ namespace AsynCUDA12.Runtime
 		}
 
 
-		// Methods
+		/// <summary>
+		/// Performs a Real-to-Complex (R2C) Fast Fourier Transform.
+		/// </summary>
+		/// <param name="indexPointer">The pointer to the input memory in the register.</param>
+		/// <param name="keep">If true, the input memory is not freed.</param>
+		/// <returns>The pointer to the output complex memory, or <see cref="IntPtr.Zero"/> if failed.</returns>
 		public IntPtr PerformFft(IntPtr indexPointer, bool keep = false)
 		{
 			// Check initialized & input pointer
@@ -123,6 +132,12 @@ namespace AsynCUDA12.Runtime
 			return outputMem.IndexPointer;
 		}
 
+		/// <summary>
+		/// Performs a Complex-to-Real (C2R) Inverse Fast Fourier Transform.
+		/// </summary>
+		/// <param name="indexPointer">The pointer to the input complex memory in the register.</param>
+		/// <param name="keep">If true, the input memory is not freed.</param>
+		/// <returns>The pointer to the output real memory, or <see cref="IntPtr.Zero"/> if failed.</returns>
 		public IntPtr PerformIfft(IntPtr indexPointer, bool keep = false)
 		{
 			// Check initialized & input pointer
@@ -220,6 +235,12 @@ namespace AsynCUDA12.Runtime
 			return outputMem.IndexPointer;
 		}
 
+		/// <summary>
+		/// Normalizes the results of an IFFT by scaling by the number of elements.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged type of the data.</typeparam>
+		/// <param name="data">The collection of data to normalize.</param>
+		/// <returns>A new array containing the normalized data.</returns>
 		public T[] NormalizeIfftResult<T>(IEnumerable<T> data) where T : unmanaged
 		{
 			if (data == null)
@@ -256,7 +277,12 @@ namespace AsynCUDA12.Runtime
 
 
 
-		// Methods (async)
+		/// <summary>
+		/// Asynchronously performs a Real-to-Complex (R2C) Fast Fourier Transform.
+		/// </summary>
+		/// <param name="pointer">The pointer to the input memory in the register.</param>
+		/// <param name="keep">If true, the input memory is not freed.</param>
+		/// <returns>A task representing the asynchronous operation, containing the output pointer.</returns>
 		public async Task<IntPtr> PerformFftAsync(IntPtr pointer, bool keep = false)
 		{
 			if (this.Register == null || this.CTX == null || pointer == IntPtr.Zero)
@@ -326,6 +352,12 @@ namespace AsynCUDA12.Runtime
 			return outputMem.IndexPointer;
 		}
 
+		/// <summary>
+		/// Asynchronously performs a Complex-to-Real (C2R) Inverse Fast Fourier Transform.
+		/// </summary>
+		/// <param name="pointer">The pointer to the input complex memory in the register.</param>
+		/// <param name="keep">If true, the input memory is not freed.</param>
+		/// <returns>A task representing the asynchronous operation, containing the output pointer.</returns>
 		public async Task<IntPtr> PerformIfftAsync(IntPtr pointer, bool keep = false)
 		{
 			if (this.Register == null || this.CTX == null || pointer == IntPtr.Zero)
@@ -394,6 +426,12 @@ namespace AsynCUDA12.Runtime
 			return outputMem.IndexPointer;
 		}
 
+		/// <summary>
+		/// Asynchronously normalizes the results of an IFFT.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged type of the data.</typeparam>
+		/// <param name="data">The collection of data to normalize.</param>
+		/// <returns>A task representing the asynchronous operation, containing the normalized array.</returns>
 		public async Task<T[]> NormalizeIfftResultAsync<T>(IEnumerable<T> data) where T : unmanaged
 		{
 			return await Task.Run(() => this.NormalizeIfftResult(data));
@@ -402,7 +440,12 @@ namespace AsynCUDA12.Runtime
 
 
 
-		// Methods (many async)
+		/// <summary>
+		/// Asynchronously performs a batch of Real-to-Complex (R2C) Fast Fourier Transforms.
+		/// </summary>
+		/// <param name="indexPointer">The pointer to the input memory in the register.</param>
+		/// <param name="keep">If true, the input memory is not freed.</param>
+		/// <returns>A task representing the asynchronous operation, containing the output pointer.</returns>
 		public async Task<IntPtr> PerformFftManyAsync(IntPtr indexPointer, bool keep = false)
 		{
 			if (this.Register == null || this.CTX == null || indexPointer == IntPtr.Zero)
@@ -474,6 +517,12 @@ namespace AsynCUDA12.Runtime
 			return outputMem.IndexPointer;
 		}
 
+		/// <summary>
+		/// Asynchronously performs a batch of Complex-to-Real (C2R) Inverse Fast Fourier Transforms.
+		/// </summary>
+		/// <param name="indexPointer">The pointer to the input complex memory in the register.</param>
+		/// <param name="keep">If true, the input memory is not freed.</param>
+		/// <returns>A task representing the asynchronous operation, containing the output pointer.</returns>
 		public async Task<IntPtr> PerformIfftManyAsync(IntPtr indexPointer, bool keep = false)
 		{
 			if (this.Register == null || this.CTX == null || indexPointer == IntPtr.Zero)
@@ -545,6 +594,12 @@ namespace AsynCUDA12.Runtime
 			return outputMem.IndexPointer;
 		}
 
+		/// <summary>
+		/// Normalizes a collection of IFFT result arrays.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged type of the data.</typeparam>
+		/// <param name="data">The collection of arrays to normalize.</param>
+		/// <returns>An array of normalized arrays.</returns>
 		internal T[][] NormalizeIfftManyResult<T>(IEnumerable<T[]> data) where T : unmanaged
 		{
 			if (data == null)
@@ -590,6 +645,12 @@ namespace AsynCUDA12.Runtime
 			return arrays;
 		}
 
+		/// <summary>
+		/// Asynchronously normalizes a collection of IFFT result arrays.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged type of the data.</typeparam>
+		/// <param name="data">The collection of arrays to normalize.</param>
+		/// <returns>A task representing the asynchronous operation, containing the normalized arrays.</returns>
 		public async Task<T[][]> NormalizeIfftManyResultAsync<T>(IEnumerable<T[]> data) where T : unmanaged
 		{
 			return await Task.Run(() => this.NormalizeIfftManyResult(data));
@@ -599,7 +660,9 @@ namespace AsynCUDA12.Runtime
 
 
 
-		// Dispose
+		/// <summary>
+		/// Releases the resources used by the <see cref="CudaFourier"/>.
+		/// </summary>
 		public void Dispose()
 		{
 			GC.SuppressFinalize(this);

@@ -28,7 +28,10 @@ namespace AsynCUDA12.Runtime
 		public static List<string> CompiledFiles => GetPtxFiles();
 
 
-		// Ctor
+		/// <summary>
+		/// Initializes a new instance of the <see cref="CudaCompiler"/> class.
+		/// </summary>
+		/// <param name="context">The CUDA primary context to use for compilation and kernel loading.</param>
 		public CudaCompiler(PrimaryContext context)
 		{
 			this.Context = context;
@@ -55,6 +58,12 @@ namespace AsynCUDA12.Runtime
 			this.CompileAll(false, true);
 		}
 
+		/// <summary>
+		/// Attempts to create a directory at the specified path.
+		/// </summary>
+		/// <param name="path">The path of the directory to create.</param>
+		/// <param name="createdPath">When this method returns, contains the path if the directory was successfully created; otherwise, an empty string.</param>
+		/// <returns>True if the directory was successfully created; otherwise, false.</returns>
 		private static bool TryCreateDirectory(string path, out string createdPath)
 		{
 			try
@@ -70,6 +79,11 @@ namespace AsynCUDA12.Runtime
 			}
 		}
 
+		/// <summary>
+		/// Ensures that the kernel directory exists, attempting to find a suitable location in the application structure.
+		/// </summary>
+		/// <param name="differentPath">An optional alternative path to use instead of the default kernel directory.</param>
+		/// <returns>The path to the kernel directory.</returns>
 		private static string EnsureKernelDirectory(string? differentPath = null)
 		{
 			if (!string.IsNullOrWhiteSpace(differentPath) && TryCreateDirectory(differentPath, out var customDir))
@@ -112,6 +126,14 @@ namespace AsynCUDA12.Runtime
 			return fallbackPath;
 		}
 
+		/// <summary>
+		/// Reads all bytes from a file with a retry mechanism to handle potential file locking issues.
+		/// </summary>
+		/// <param name="path">The path to the file to read.</param>
+		/// <param name="retries">The number of times to retry reading the file if an IOException occurs.</param>
+		/// <param name="delayMs">The delay in milliseconds between retries.</param>
+		/// <returns>A byte array containing the file contents.</returns>
+		/// <exception cref="IOException">Thrown if the file cannot be read after all retry attempts.</exception>
 		private static byte[] ReadAllBytesWithRetry(string path, int retries = 3, int delayMs = 50)
 		{
 			for (int attempt = 0; attempt <= retries; attempt++)
@@ -138,7 +160,11 @@ namespace AsynCUDA12.Runtime
 
 
 
-		// Methods (static)
+		/// <summary>
+		/// Gets a list of all PTX files in the specified directory.
+		/// </summary>
+		/// <param name="path">The directory to search for PTX files. If null, uses the default KernelPath/PTX directory.</param>
+		/// <returns>A list of full paths to the found PTX files.</returns>
 		public static List<string> GetPtxFiles(string? path = null)
 		{
 			path ??= Path.Combine(KernelPath, "PTX");
@@ -150,6 +176,11 @@ namespace AsynCUDA12.Runtime
 			return files.ToList();
 		}
 
+		/// <summary>
+		/// Gets a list of all CU files in the specified directory.
+		/// </summary>
+		/// <param name="path">The directory to search for CU files. If null, uses the default KernelPath/CU directory.</param>
+		/// <returns>A list of full paths to the found CU files.</returns>
 		public static List<string> GetCuFiles(string? path = null)
 		{
 			path ??= Path.Combine(KernelPath, "CU");
@@ -163,7 +194,9 @@ namespace AsynCUDA12.Runtime
 
 
 
-		// Methods (Load & Unload)
+		/// <summary>
+		/// Unloads the currently loaded CUDA kernel and clears the kernel state.
+		/// </summary>
 		public void UnloadKernel()
 		{
 			// Unload kernel
@@ -185,6 +218,12 @@ namespace AsynCUDA12.Runtime
 			this.KernelCode = null;
 		}
 
+		/// <summary>
+		/// Loads a CUDA kernel from a PTX file or a .cu file.
+		/// </summary>
+		/// <param name="kernelName">The name of the kernel to load. Can be a filename or a kernel name.</param>
+		/// <param name="silent">If true, suppresses logging during the loading process.</param>
+		/// <returns>The loaded <see cref="CudaKernel"/>, or null if loading failed.</returns>
 		public CudaKernel? LoadKernel(string kernelName, bool silent = false)
 		{
 			if (this.Context == null)
@@ -260,7 +299,11 @@ namespace AsynCUDA12.Runtime
 		}
 
 
-		// Methods (Compile)
+		/// <summary>
+		/// Compiles all source files found in the kernel directory.
+		/// </summary>
+		/// <param name="silent">If true, suppresses logging during compilation.</param>
+		/// <param name="logErrors">If true, logs errors for each failed compilation.</param>
 		public void CompileAll(bool silent = false, bool logErrors = false)
 		{
 			List<string> sourceFiles = SourceFiles;
@@ -276,6 +319,12 @@ namespace AsynCUDA12.Runtime
 			}
 		}
 
+		/// <summary>
+		/// Compiles a single CUDA kernel from a file or a string.
+		/// </summary>
+		/// <param name="filepath">The path to the .cu file, or a raw kernel string if the extension is not .cu.</param>
+		/// <param name="silent">If true, suppresses logging during compilation.</param>
+		/// <returns>The path to the generated PTX file, or null if compilation failed.</returns>
 		public string? CompileKernel(string filepath, bool silent = false)
 		{
 			if (this.Context == null)
@@ -357,6 +406,12 @@ namespace AsynCUDA12.Runtime
 
 		}
 
+		/// <summary>
+		/// Compiles a CUDA kernel from a raw string.
+		/// </summary>
+		/// <param name="kernelString">The raw CUDA kernel source code.</param>
+		/// <param name="silent">If true, suppresses logging during compilation.</param>
+		/// <returns>The path to the generated PTX file, or null if compilation failed.</returns>
 		public string? CompileString(string kernelString, bool silent = false)
 		{
 			if (this.Context == null)
@@ -437,6 +492,12 @@ namespace AsynCUDA12.Runtime
 			}
 		}
 
+		/// <summary>
+		/// Performs a preliminary check on a kernel string to ensure it follows expected patterns.
+		/// </summary>
+		/// <param name="kernelString">The raw CUDA kernel source code to check.</param>
+		/// <param name="silent">If true, suppresses logging during the check.</param>
+		/// <returns>The extracted kernel name if valid; otherwise, null.</returns>
 		public string? PrecompileKernelString(string kernelString, bool silent = false)
 		{
 			// Check contains "extern c"
@@ -539,6 +600,11 @@ namespace AsynCUDA12.Runtime
 
 
 		// Methods (Arguments)
+		/// <summary>
+		/// Maps a CUDA type name string to its corresponding .NET <see cref="Type"/>.
+		/// </summary>
+		/// <param name="typeName">The name of the type (e.g., "int", "float", "double").</param>
+		/// <returns>The corresponding .NET <see cref="Type"/>.</returns>
 		public Type GetArgumentType(string typeName)
 		{
 			// Pointers are always IntPtr (containing *)
@@ -563,6 +629,12 @@ namespace AsynCUDA12.Runtime
 			return type;
 		}
 
+		/// <summary>
+		/// Parses a kernel's source code to extract its argument names and types.
+		/// </summary>
+		/// <param name="kernelCode">The source code of the kernel, or a path/name to resolve it.</param>
+		/// <param name="silent">If true, suppresses logging during parsing.</param>
+		/// <returns>A dictionary mapping argument names to their .NET <see cref="Type"/>.</returns>
 		public Dictionary<string, Type> GetArguments(string? kernelCode = null, bool silent = false)
 		{
 			string? sourceCode = null;
@@ -714,6 +786,12 @@ namespace AsynCUDA12.Runtime
 			return arguments;
 		}
 
+		/// <summary>
+		/// Counts the number of pointer arguments (IntPtr) in a kernel.
+		/// </summary>
+		/// <param name="kernelCode">The source code of the kernel, or a path/name to resolve it.</param>
+		/// <param name="silent">If true, suppresses logging.</param>
+		/// <returns>The number of pointer arguments.</returns>
 		public int GetPointerArgsCount(string? kernelCode = null, bool silent = false)
 		{
 			kernelCode ??= this.KernelCode;
@@ -733,6 +811,11 @@ namespace AsynCUDA12.Runtime
 
 
 		// Merge args for execution
+		/// <summary>
+		/// Merges a provided array of values into a correctly ordered array for kernel execution based on argument definitions.
+		/// </summary>
+		/// <param name="arguments">The array of values to merge.</param>
+		/// <returns>An array of objects ordered for kernel execution.</returns>
 		public object[] MergeArgumentsRaw(object[] arguments)
 		{
 			// Get kernel argument definitions
@@ -761,6 +844,16 @@ namespace AsynCUDA12.Runtime
 			return kernelArgs;
 		}
 
+		/// <summary>
+		/// Merges audio-specific parameters into a kernel argument array.
+		/// </summary>
+		/// <param name="inputPointer">The input data pointer.</param>
+		/// <param name="outputPointer">The output data pointer.</param>
+		/// <param name="sampleRate">The audio sample rate.</param>
+		/// <param name="channels">The number of audio channels.</param>
+		/// <param name="bitdepth">The audio bit depth.</param>
+		/// <param name="namedArguments">Optional dictionary of additional named arguments.</param>
+		/// <returns>An array of objects ordered for kernel execution.</returns>
 		public object[] MergeArgumentsAudio(CUdeviceptr inputPointer, CUdeviceptr outputPointer, int sampleRate = 44100, int channels = 2, int bitdepth = 32, Dictionary<string, object>? namedArguments = null)
 		{
 			// Get kernel argument definitions
@@ -836,6 +929,18 @@ namespace AsynCUDA12.Runtime
 			return kernelArgs;
 		}
 
+		/// <summary>
+		/// Merges image-specific parameters into a kernel argument array.
+		/// </summary>
+		/// <param name="inputPointer">The input image pointer.</param>
+		/// <param name="outputPointer">The output image pointer.</param>
+		/// <param name="width">The image width.</param>
+		/// <param name="height">The image height.</param>
+		/// <param name="channels">The number of image channels.</param>
+		/// <param name="bitdepth">The image bit depth.</param>
+		/// <param name="arguments">An array of additional arguments.</param>
+		/// <param name="silent">If true, suppresses logging.</param>
+		/// <returns>An array of objects ordered for kernel execution.</returns>
 		public object[] MergeArgumentsImage(CUdeviceptr inputPointer, CUdeviceptr outputPointer, int width, int height, int channels, int bitdepth, object[] arguments, bool silent = false)
 		{
 			// Get kernel argument definitions
@@ -940,7 +1045,9 @@ namespace AsynCUDA12.Runtime
 
 
 
-		// Dispose
+		/// <summary>
+		/// Releases the resources used by the <see cref="CudaCompiler"/>.
+		/// </summary>
 		public void Dispose()
 		{
 			GC.SuppressFinalize(this);
