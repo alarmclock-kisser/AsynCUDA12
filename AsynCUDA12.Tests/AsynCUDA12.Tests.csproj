@@ -27,6 +27,8 @@
     <ProjectReference Include="..\AsynCUDA12.Core\AsynCUDA12.Core.csproj" />
     <ProjectReference Include="..\AsynCUDA12.Runtime\AsynCUDA12.Runtime.csproj" />
     <ProjectReference Include="..\AsynCUDA12.GpuDatabase\AsynCUDA12.GpuDatabase.csproj" />
+    <ProjectReference Include="..\AsynCUDA.OpenCl\AsynCUDA.OpenCl.csproj" />
+    <ProjectReference Include="..\AsynCUDA.ClDatabase\AsynCUDA.ClDatabase.csproj" />
   </ItemGroup>
 
   <ItemGroup>
