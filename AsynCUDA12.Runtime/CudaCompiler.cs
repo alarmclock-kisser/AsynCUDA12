@@ -11,20 +11,39 @@ using System.Threading;
 
 namespace AsynCUDA12.Runtime
 {
+	/// <summary>
+	/// Discovers, compiles, loads and inspects CUDA kernels for the runtime.
+	/// The compiler manages the on-disk kernel directory structure (CU sources, PTX output and logs),
+	/// compiles <c>.cu</c> files or raw kernel strings to PTX via NVRTC, loads PTX modules into the CUDA
+	/// context, and parses kernel signatures to map CUDA argument types to .NET types and build ordered
+	/// argument arrays for execution.
+	/// </summary>
 	public class CudaCompiler : IDisposable
 	{
 		// Fields
+		/// <summary>The CUDA primary context used for compilation and kernel loading.</summary>
 		private PrimaryContext Context;
 
+		/// <summary>The currently loaded CUDA kernel, or <c>null</c> if none is loaded.</summary>
 		internal CudaKernel? Kernel = null;
+
+		/// <summary>The name of the currently loaded kernel, or <c>null</c> if none is loaded.</summary>
 		public string? KernelName = null;
+
+		/// <summary>The PTX file path of the currently loaded kernel, or <c>null</c> if none is loaded.</summary>
 		public string? KernelFile = null;
+
+		/// <summary>The source code (<c>.cu</c> content) of the currently loaded kernel, or <c>null</c> if unavailable.</summary>
 		public string? KernelCode = null;
 
 		// Properties (static)
+		/// <summary>Gets the resolved root directory that contains the CU, PTX and Logs sub-folders for kernels.</summary>
 		public static string KernelPath = EnsureKernelDirectory();
 
+		/// <summary>Gets the list of available CUDA source (<c>.cu</c>) files.</summary>
 		public static List<string> SourceFiles => GetCuFiles();
+
+		/// <summary>Gets the list of compiled PTX (<c>.ptx</c>) files.</summary>
 		public static List<string> CompiledFiles => GetPtxFiles();
 
 

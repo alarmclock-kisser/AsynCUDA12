@@ -1,0 +1,486 @@
+Requirement: GPU-basiertes Datenbank-Management-System mit AsynCUDA12.Runtime
+
+Ziel
+----
+Es soll ein Datenbank-Management-System entwickelt werden, bei dem die aktive Datenhaltung und ein grosser Teil der Query-Verarbeitung im GPU-VRAM erfolgt. Die Umsetzung soll speziell auf die vorhandene AsynCUDA12.Runtime API ausgelegt sein. Die Host-Seite wird in C#/.NET 8 umgesetzt und nutzt CudaService als zentrales Facade-Objekt fuer Initialisierung, Speicherverwaltung, Kernel-Kompilierung, Kernel-Ausfuehrung, asynchrone Transfers, Logging und optionale FFT-Operationen.
+
+Das System soll beim Start eine persistierte Datenbankdatei von der Festplatte laden, in GPU-freundliche Speicherlayouts transformieren und mit AsynCUDA12.Runtime in den VRAM uebertragen. Beim Beenden oder bei explizitem Checkpoint/Snapshot sollen die relevanten Daten aus dem VRAM zurueck in den Host-Speicher kopiert und auf die Festplatte persistiert werden.
+
+Technische Grundlage
+--------------------
+Verwendete Runtime:
+- AsynCUDA12.Runtime
+- Zielplattform: .NET 10.0 x64
+- CUDA-Anbindung ueber ManagedCuda
+- Zentrale Einstiegsklasse: CudaService
+- Kernel-Verwaltung ueber CudaCompiler
+- Kernel-Ausfuehrung ueber CudaLauncher
+- Speicherverwaltung ueber CudaRegister/CudaMem indirekt via CudaService
+- Optional: CudaFourier fuer spezielle Signal-/Vektoranalysen
+- Logging und Diagnose ueber CudaLogger
+
+Grundprinzip
+------------
+Die Datenbank wird als GPU-native In-Memory-Datenbank umgesetzt. Die Festplatte dient primaer als persistenter Speicher, waehrend aktive Tabellen, Indizes und Query-Zwischenergebnisse im VRAM gehalten werden.
+
+Da CUDA-Kernel nur unmanaged Datentypen direkt verarbeiten koennen, duerfen keine .NET string-Objekte direkt in den VRAM geschrieben werden. Strings werden vor dem Upload in byte-basierte Strukturen umgewandelt.
+
+Vorgeschlagenes Datenlayout
+---------------------------
+Das DBMS soll bevorzugt spaltenorientiert arbeiten, da Columnar Layout fuer GPU-Kernel besser geeignet ist als zeilenorientierte Objektstrukturen.
+
+Beispiel fuer eine Tabelle Users:
+
+Tabelle Users:
+- Spalte Id: int[]
+- Spalte Age: int[]
+- Spalte Balance: float[]
+- Spalte Name: byte[] stringData + int[] offsets + int[] lengths
+
+String-Repraesentation:
+- Alle Strings einer Spalte werden in einem fortlaufenden byte-Array im UTF-8 Format gespeichert.
+- Eine offsets-Spalte enthaelt den Startindex jedes Strings im byte-Array.
+- Eine lengths-Spalte enthaelt die Laenge jedes Strings in Bytes.
+
+Beispiel:
+stringData = "MaxLisaJohn" als UTF-8 bytes
+offsets = [0, 3, 7]
+lengths = [3, 4, 4]
+
+Optional kann ein Null-Terminator verwendet werden, ist aber nicht zwingend noetig, wenn lengths vorhanden sind.
+
+Speicherobjekte mit AsynCUDA12.Runtime
+--------------------------------------
+Jede Spalte oder jeder zusammenhaengende Spaltenbestandteil wird als eigener CudaMem im Registry-System der Runtime verfolgt.
+
+Beispiel:
+- Id-Spalte: CudaMem<int>
+- Age-Spalte: CudaMem<int>
+- Balance-Spalte: CudaMem<float>
+- Name stringData: CudaMem<byte>
+- Name offsets: CudaMem<int>
+- Name lengths: CudaMem<int>
+
+Die IndexPointer der CudaMem-Objekte werden in der DB-internen Metadatenstruktur gespeichert. Diese Pointer sind die Primaerschluessel, ueber die Speicher wiedergefunden, an Kernel uebergeben, gepullt oder freigegeben werden.
+
+Wichtige Regel:
+PullData gibt Speicher standardmaessig frei, wenn keepBuffer bzw. keep nicht true ist. Fuer normale Query-Operationen muss keepBuffer=true genutzt werden, solange eine Spalte weiterhin im VRAM bleiben soll.
+
+Startablauf
+-----------
+1. CudaService initialisieren.
+2. Verfuegbare Devices ueber CudaService.DeviceCount und AvailableDevicesProps pruefen.
+3. Bevorzugtes Device per Device-ID oder Name initialisieren.
+4. Persistierte DB-Datei von Disk lesen.
+5. Tabellenmetadaten parsen.
+6. Spalten in unmanaged Arrays transformieren.
+7. Strings in byte[], offsets[] und lengths[] transformieren.
+8. Spalten mittels PushData oder PushDataAsync in den VRAM laden.
+9. CudaMem-Objekte und IndexPointer in einem TableCatalog registrieren.
+10. Vorhandene CUDA-Kernel aus Kernels/CU automatisch oder explizit kompilieren lassen.
+11. Tabellenstatus auf Loaded setzen.
+
+Shutdown-Ablauf
+---------------
+1. Offene Query-Kernels abschliessen lassen.
+2. Fuer jede persistente Spalte PullData mit keepBuffer=true oder kontrolliert keepBuffer=false ausfuehren.
+3. Daten in Host-Strukturen zuruecktransformieren.
+4. Stringspalten aus byte[], offsets[] und lengths[] rekonstruieren oder direkt kompakt speichern.
+5. DB-Datei atomar neu schreiben, z.B. temp-Datei schreiben und danach ersetzen.
+6. Danach CudaService.Dispose aufrufen, damit registrierter VRAM-Speicher freigegeben wird.
+
+Persistenzformat
+----------------
+Das Persistenzformat soll einfach, robust und GPU-freundlich sein.
+
+Vorgeschlagene Struktur:
+- FileHeader
+  - Magic Bytes, z.B. GPDB
+  - Version
+  - Endianness
+  - TableCount
+  - MetadataOffset
+  - DataOffset
+- TableMetadata
+  - Tabellenname
+  - RowCount
+  - ColumnCount
+  - ColumnDefinitions
+- ColumnDefinition
+  - ColumnName
+  - LogicalType
+  - PhysicalType
+  - ElementSize
+  - ElementCount
+  - DataOffset
+  - DataLength
+  - Optional: OffsetColumnRef und LengthColumnRef fuer Strings
+- Raw Column Data
+
+Alle numerischen Daten sollen moeglichst direkt als zusammenhaengende Arrays gespeichert werden. Dadurch kann beim Laden schnell in Arrays gelesen und direkt mit PushDataAsync in den VRAM uebertragen werden.
+
+Host-seitige Hauptklassen
+-------------------------
+Folgende Host-Klassen sollen implementiert werden:
+
+GpuDatabase
+- Verantwortlich fuer Lebenszyklus der Datenbank.
+- Besitzt eine CudaService-Instanz.
+- Verwaltet TableCatalog, KernelCatalog und PersistenceManager.
+- Methoden:
+  - Open(path)
+  - Save(path)
+  - Checkpoint()
+  - Close()
+  - ExecuteQuery(query)
+
+GpuTable
+- Repraesentiert eine Tabelle im VRAM.
+- Besitzt Tabellenname, RowCount und Spaltenliste.
+- Enthaelt Methoden zum Zugriff auf Spaltenmetadaten.
+
+GpuColumn
+- Repraesentiert eine Spalte oder einen Bestandteil einer komplexen Spalte.
+- Speichert LogicalType, PhysicalType, ElementCount, ElementSize und IndexPointer.
+- Besitzt optional CudaMem-Referenz.
+
+GpuStringColumn
+- Spezialstruktur fuer String-Spalten.
+- Besteht aus:
+  - byteDataColumn
+  - offsetsColumn
+  - lengthsColumn
+  - optional dictionaryColumn
+
+TableCatalog
+- Verwaltet alle Tabellen und deren Spalten.
+- Loest Tabellennamen und Spaltennamen zu IndexPointern auf.
+
+GpuQueryEngine
+- Nimmt Query-Objekte oder SQL-aehnliche Strings an.
+- Plant Kernel-Pipelines.
+- Verwaltet Zwischenergebnisse im VRAM.
+
+GpuKernelPipeline
+- Repraesentiert eine Abfolge von Kernel-Aufrufen.
+- Fuehrt Filter, Projektion, Aggregation, Sortierung oder Join nacheinander aus.
+
+PersistenceManager
+- Liest und schreibt das DB-Dateiformat.
+- Transformiert Strings in byte/offets/lengths.
+- Achtet auf atomare Writes.
+
+KernelCatalog
+- Kennt die verfuegbaren Kernel-Namen.
+- Stellt sicher, dass benoetigte Kernel kompiliert und geladen sind.
+
+MemoryPolicy
+- Regeln fuer VRAM-Nutzung.
+- Hot/Cold-Strategie.
+- Freigabe von temporaeren Buffern.
+
+Kernel-Konzept mit AsynCUDA12.Runtime
+-------------------------------------
+CUDA-Kernel sollen als .cu Dateien im von CudaCompiler erwarteten Ordner Kernels/CU abgelegt werden. Der Compiler erzeugt PTX-Dateien im Ordner Kernels/PTX. Compile- und Load-Logs liegen unter Kernels/Logs.
+
+Kernel muessen als extern "C" __global__ void Funktionen definiert werden.
+
+Die Runtime analysiert Kernel-Signaturen. Pointer-Argumente werden auf IntPtr gemappt. Skalare Argumente muessen als int, float, double, char, bool oder byte uebergibbar sein.
+
+Wichtig fuer CudaLauncher.ExecuteLinearKernel:
+- Der erste Pointer ist typischerweise die In-Place-Hauptspalte oder der Hauptbuffer.
+- Die Methode arbeitet auf einem linearen 1D-Buffer.
+- length wird separat an ExecuteLinearKernel uebergeben.
+- Die arguments-Liste darf nur die erwarteten skalaren Parameter enthalten, nicht die Pointer.
+- Blockgroesse wird von der Runtime intern mit 256 Threads berechnet.
+
+Wichtig:
+ExecuteLinearKernel arbeitet konzeptionell mit einem Hauptpointer. Fuer Operationen mit mehreren Spalten oder separaten Output-Buffern kann es noetig sein, Kernel-Signaturen und Runtime-Nutzung so zu gestalten, dass zusaetzliche Pointer korrekt gemappt werden koennen. Falls die vorhandene ExecuteLinearKernel-Schnittstelle fuer Multi-Pointer-Kernel zu restriktiv ist, soll eine DB-spezifische Erweiterung oder ein eigener Launcher-Wrapper implementiert werden, der CudaCompiler.LoadKernel, CudaCompiler.GetArguments und ManagedCuda-Kernelaufrufe direkt nutzt.
+
+Mindest-Kernel
+--------------
+Folgende CUDA-Kernel sollen fuer eine erste Version implementiert werden:
+
+1. filter_int_equals
+Aufgabe:
+- Prueft pro Zeile, ob column[i] == value.
+- Schreibt 1 oder 0 in einen mask-Buffer.
+
+Parameteridee:
+- int* column
+- byte* mask
+- int length
+- int value
+
+2. filter_int_range
+Aufgabe:
+- Prueft min <= column[i] <= max.
+- Schreibt Ergebnis in mask.
+
+3. filter_float_range
+Aufgabe:
+- Bereichsfilter fuer float-Spalten.
+
+4. project_by_mask
+Aufgabe:
+- Kopiert oder markiert Werte, deren mask[i] == 1 ist.
+- Optional zweistufig mit Prefix Sum fuer echte Kompaktierung.
+
+5. count_mask
+Aufgabe:
+- Zaehlt Treffer in einer byte-Maske.
+- Nutzt blockweise Reduktion.
+
+6. sum_float_by_mask
+Aufgabe:
+- Summiert float-Werte, deren mask[i] == 1 ist.
+
+7. min_max_float
+Aufgabe:
+- Berechnet Minimum und Maximum einer float-Spalte.
+
+8. string_contains_ascii_or_utf8_simple
+Aufgabe:
+- Sucht ein Pattern im String-Bytebuffer anhand offsets und lengths.
+- Schreibt Treffer in mask.
+
+9. string_fuzzy_levenshtein_limited
+Aufgabe:
+- Berechnet eine begrenzte Levenshtein-Distanz pro String.
+- Maximaldistanz wird als Parameter uebergeben.
+- Optimiert fuer kurze Strings.
+
+10. hash_join_int
+Aufgabe:
+- Fuehrt einen Join auf int-Keys durch.
+- Erste Version darf einfache Hash-Tabelle mit Open Addressing verwenden.
+
+11. build_hash_index_int
+Aufgabe:
+- Baut einen GPU-Hash-Index fuer int-Spalten.
+
+12. apply_arithmetic_float
+Aufgabe:
+- Wendet einfache Transformationen auf float-Spalten an, z.B. multiply, add, normalize.
+
+Query-Verarbeitung
+------------------
+Die Query Engine soll Queries in eine Pipeline aus GPU-Operationen uebersetzen.
+
+Beispiel:
+SELECT AVG(balance) FROM users WHERE age BETWEEN 20 AND 40
+
+Moegliche Pipeline:
+1. filter_int_range auf users.age erzeugt mask.
+2. sum_float_by_mask auf users.balance und mask erzeugt partial sums.
+3. count_mask erzeugt Trefferanzahl.
+4. Host berechnet avg = sum / count oder GPU-Kernel berechnet finalen Wert.
+
+Beispiel:
+SELECT * FROM users WHERE name FUZZY 'marcel' DISTANCE 2
+
+Moegliche Pipeline:
+1. Pattern 'marcel' als byte[] in VRAM pushen.
+2. string_fuzzy_levenshtein_limited mit stringData, offsets, lengths und pattern ausfuehren.
+3. mask enthaelt passende Zeilen.
+4. Ergebnis kann als RowId-Liste oder mask zurueckgegeben werden.
+
+Temporaere Speicherverwaltung
+----------------------------
+Query-Zwischenergebnisse wie masks, partial sums, hash tables oder row id buffers sollen ebenfalls als CudaMem verwaltet werden.
+
+Regeln:
+- Temporaere CudaMem-Objekte immer im QueryContext registrieren.
+- Nach Query-Ende temporaere Buffer mit FreeMemory freigeben.
+- Persistente Tabellenspalten niemals versehentlich durch PullData ohne keepBuffer freigeben.
+- Bei Exceptions QueryContext.Dispose ausfuehren, um temporaeren VRAM freizugeben.
+
+Asynchrone Verarbeitung
+-----------------------
+AsynCUDA12.Runtime unterstuetzt asynchrone Push-/Pull-Operationen und nutzt CUDA-Streams intern.
+
+Anforderungen:
+- Initiales Laden grosser Tabellen soll PushDataAsync oder PushChunksAsync verwenden.
+- Persistenz-Snapshots koennen PullDataAsync verwenden.
+- Mehrere unabhaengige Spalten koennen parallel geladen werden.
+- Query Engine soll perspektivisch mehrere Query-Pipelines parallel ausfuehren koennen.
+- Stream-Auslastung kann ueber ThreadsActive, ThreadsIdle und StreamThreadsList beobachtet werden.
+
+Indexing
+--------
+Das System soll GPU-freundliche Indizes unterstuetzen.
+
+1. Hash Index fuer int/long Keys
+- Fuer Equality-Filter und Joins.
+- Speicherung im VRAM als key/value Arrays.
+
+2. Sorted Index
+- Fuer Range Queries.
+- Speicherung als sortierte key/rowId Paare.
+- Binary Search oder parallele lower/upper-bound Kernel.
+
+3. Inverted Text Index optional
+- Fuer Stringsuche.
+- Token zu RowId-Liste.
+- Besonders interessant fuer Volltextsuche.
+
+4. Dictionary Encoding fuer String-Spalten
+- Wiederholte Strings werden durch integer IDs ersetzt.
+- Stringvergleiche koennen dann als int-Vergleiche laufen.
+- Originalwerte bleiben in Dictionary-byte/offets/lengths gespeichert.
+
+Erweiterte Ideen
+----------------
+Folgende Erweiterungen sind optional, aber sinnvoll:
+
+1. SQL-zu-Kernel-Pipeline
+- Ein Parser wandelt SQL-aehnliche Queries in einen logischen Plan.
+- Der Plan wird in GPU-Operationen uebersetzt.
+
+2. Query JIT mit NVRTC
+- Fuer spezielle Query-Kombinationen koennen zur Laufzeit optimierte CUDA-Kernel als String generiert werden.
+- CudaCompiler.CompileString kann diese Kernel kompilieren.
+- Danach kann der Kernel per LoadKernel geladen und ausgefuehrt werden.
+
+3. Adaptive Query Optimizer
+- Kernel-Laufzeiten messen.
+- Bei kleinen Datenmengen Host-Ausfuehrung erlauben.
+- Bei grossen Datenmengen GPU-Pipeline nutzen.
+- Strategie fuer Join oder Stringsuche automatisch waehlen.
+
+4. Hot/Cold Storage
+- Hauefig genutzte Tabellen bleiben im VRAM.
+- Selten genutzte Tabellen bleiben in RAM oder Disk.
+- Bei Bedarf werden Cold Tables nachgeladen.
+
+5. Snapshots und Write-Ahead-Log
+- Neben kompletter Persistenz sollte es ein WAL geben.
+- Inserts/Updates/Deletes werden zuerst als Log geschrieben.
+- Danach werden VRAM-Strukturen aktualisiert.
+- Beim Crash kann die DB aus Snapshot plus WAL wiederhergestellt werden.
+
+6. DirectML/ML-Integration
+- Numerische Spalten koennen als Tensoren interpretiert werden.
+- Feature Engineering kann direkt auf der GPU stattfinden.
+- Perspektivisch koennen Daten ohne CPU-Roundtrip an ML-Pipelines uebergeben werden.
+
+7. FFT-basierte Analysen
+- CudaFourier kann fuer spezielle analytische Workloads genutzt werden.
+- Beispiele: Frequenzanalyse von Zeitreihen, Signalspalten, Anomalieerkennung.
+
+8. GPU-side Data Cleaning
+- Normalisierung, Skalierung, Clamping, Missing-Value-Markierung und einfache Transformationen direkt per Kernel.
+
+Insert/Update/Delete Konzept
+----------------------------
+Da GPU-Speicher gut fuer zusammenhaengende Arrays ist, sollen Schreiboperationen batch-orientiert umgesetzt werden.
+
+Insert:
+- Neue Rows werden zuerst in einem Host-seitigen DeltaBuffer gesammelt.
+- Ab bestimmter Groesse wird ein neuer GPU-Chunk erzeugt.
+- Tabellen koennen intern aus mehreren Chunks bestehen.
+
+Update:
+- Updates werden als Delta-Map gespeichert.
+- Fuer numerische Spalten kann ein update_by_rowid Kernel Werte ersetzen.
+- Fuer String-Spalten werden neue Stringdaten append-only gespeichert und offsets/lengths aktualisiert.
+
+Delete:
+- Deletes sollen zunaechst als deletedMask umgesetzt werden.
+- Physische Kompaktierung erfolgt spaeter per Vacuum/Compaction.
+
+Chunking
+--------
+Sehr grosse Tabellen sollen in Chunks aufgeteilt werden koennen.
+
+Gruende:
+- VRAM-Limitierung
+- einfachere Inserts
+- einfachere Freigabe von Cold Chunks
+- bessere parallele Verarbeitung
+
+AsynCUDA12.Runtime bietet PushChunks, PullChunks und AllocateGroup. Diese koennen genutzt werden, um mehrere gleichartige Buffer als Gruppe zu verwalten. Zu beachten ist, dass eine CudaMem-Gruppe nur Buffer desselben Elementtyps beschreibt.
+
+Fehlerbehandlung und Diagnose
+-----------------------------
+Anforderungen:
+- Vor jeder GPU-Operation cuda.Online pruefen.
+- Null Rueckgaben von Push/Allocate/LoadKernel/ExecuteKernel behandeln.
+- Empty arrays bei Pull-Fehlern erkennen.
+- Compile- und Load-Logs aus Kernels/Logs auswerten.
+- CudaService.TotalAllocated, RegisteredMemoryObjects, MemorySizesList und StreamThreadsList fuer Monitoring verwenden.
+- Bei Query-Fehlern temporaere CudaMem-Objekte freigeben.
+- Optional Diagnosemodus mit detailliertem Query-Plan und Kernel-Laufzeiten.
+
+Nicht-Ziele fuer Version 1
+--------------------------
+Diese Punkte muessen in V1 nicht vollstaendig umgesetzt werden:
+- Vollstaendiger SQL-Standard
+- Voll transaktionales MVCC
+- Verteilte Datenbank ueber mehrere Maschinen
+- Automatischer Multi-GPU-Sharding-Support
+- Beliebig komplexe Unicode-Normalisierung in CUDA
+- Voll optimierter GPU-Sortierer fuer alle Datentypen
+
+MVP Umfang
+----------
+Eine erste lauffaehige Version soll mindestens enthalten:
+
+1. CudaService Initialisierung und Device-Auswahl.
+2. Laden einer einfachen DB-Datei mit mindestens einer Tabelle.
+3. Spaltenorientiertes Layout fuer int, float, double und string.
+4. String-Encoding als byteData plus offsets plus lengths.
+5. Upload aller Spalten in den VRAM via PushDataAsync.
+6. TableCatalog mit IndexPointern pro Spalte.
+7. Mindestens drei Kernel:
+   - filter_int_equals
+   - filter_int_range
+   - string_contains_simple
+8. Query Engine fuer einfache WHERE-Filter.
+9. Rueckgabe einer Treffer-Maske oder RowId-Liste.
+10. Persistenz beim Shutdown.
+11. Saubere Freigabe aller temporaeren und persistenten GPU-Speicher.
+12. Logging und Fehlerausgabe.
+
+Akzeptanzkriterien
+------------------
+- Die DB kann gestartet werden und initialisiert ein CUDA-Device erfolgreich.
+- Eine persistierte Tabelle kann geladen und in den VRAM uebertragen werden.
+- Numerische Spalten werden als unmanaged Arrays gespeichert.
+- String-Spalten werden als byte/offets/lengths gespeichert.
+- Mindestens ein CUDA-Kernel kann aus Kernels/CU kompiliert, geladen und ausgefuehrt werden.
+- Ein WHERE-Filter auf int-Spalten erzeugt korrekte Treffer.
+- Eine einfache Stringsuche erzeugt korrekte Treffer.
+- Die Daten koennen beim Beenden wieder auf Disk geschrieben werden.
+- PullData wird fuer persistente Spalten nur mit keepBuffer=true verwendet, solange sie weiter im VRAM bleiben sollen.
+- Temporaere Speicherobjekte werden nach Query-Ende freigegeben.
+- CudaService.Dispose gibt am Ende alle registrierten VRAM-Allokationen frei.
+
+Empfohlene Implementierungsreihenfolge
+--------------------------------------
+1. Projektstruktur und GpuDatabase-Klasse erstellen.
+2. CudaService Initialisierung kapseln.
+3. Einfaches Persistenzformat implementieren.
+4. Columnar TableCatalog implementieren.
+5. String-Encoding implementieren.
+6. Upload/Download von Spalten implementieren.
+7. Erste CUDA-Kernel unter Kernels/CU ablegen.
+8. Kernel kompilieren und mit CudaLauncher testen.
+9. QueryContext fuer temporaeren Speicher implementieren.
+10. Einfache WHERE Query Engine implementieren.
+11. Persistenz beim Shutdown implementieren.
+12. Erweiterungen wie Fuzzy Search, Aggregates, Hash Index und JIT-Kernel hinzufuegen.
+
+Wichtige Designregeln
+---------------------
+- Keine .NET Objekte oder strings direkt in CUDA-Speicher schreiben.
+- Nur unmanaged Arrays mit PushData/PushDataAsync verwenden.
+- Spaltenorientiertes Layout bevorzugen.
+- IndexPointer immer zentral im Catalog speichern.
+- keepBuffer bewusst setzen.
+- Temporaere GPU-Speicher konsequent freigeben.
+- Multi-Pointer-Kernel frueh testen, da ExecuteLinearKernel eventuell einen zusaetzlichen DB-spezifischen Launcher-Wrapper benoetigt.
+- Kernel-Signaturen einfach und eindeutig halten.
+- Query-Verarbeitung als Pipeline aus kleinen Kernel-Schritten bauen.
+- Persistenzformat so gestalten, dass es direkt zu GPU-Arrays passt.
+

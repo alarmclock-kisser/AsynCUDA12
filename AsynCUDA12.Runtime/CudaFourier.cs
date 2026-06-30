@@ -10,10 +10,20 @@ using System.Threading.Tasks;
 
 namespace AsynCUDA12.Runtime
 {
+	/// <summary>
+	/// Provides GPU-accelerated Fast Fourier Transform (FFT) operations for registered device memory.
+	/// Supports Real-to-Complex (R2C) forward transforms and Complex-to-Real (C2R) inverse transforms,
+	/// in synchronous, asynchronous (stream-based) and batched ("many") variants, plus helpers to
+	/// normalize inverse-transform results. Allocations are obtained from and released through the
+	/// associated <see cref="CudaRegister"/>.
+	/// </summary>
 	public class CudaFourier : IDisposable
 	{
 		// Fields
+		/// <summary>The CUDA primary context used for transform execution and synchronization.</summary>
 		private PrimaryContext CTX;
+
+		/// <summary>The registry used to allocate and free the transform input/output buffers.</summary>
 		private CudaRegister Register;
 
 

@@ -1,0 +1,948 @@
+================================================================================
+ AsynCUDA12.Runtime - Technical API Documentation
+================================================================================
+
+ Product : AsynCUDA12-13
+ Author  : alarmclock-kisser
+ Version : 3.0.0
+ Target  : .NET 8.0 (x64, AllowUnsafeBlocks, Nullable enabled)
+ Depends : ManagedCuda-12 (12.8.60), ManagedCuda-13 (13.0.64),
+           ManagedCuda-CUFFT (13.0.64), ManagedCuda-NVRTC (13.0.64)
+
+ This document describes the complete public and internal surface of the
+ AsynCUDA12.Runtime project: its architecture, classes, methods, parameters,
+ return values, threading behavior, memory lifecycle and typical usage flows.
+
+--------------------------------------------------------------------------------
+ TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+
+ 1.  Overview
+ 2.  Architecture & Component Map
+ 3.  Core Concepts (Pointers, Memory Lifecycle, Streams, Kernels)
+ 4.  Class: CudaService          (public facade)
+ 5.  Class: CudaRegister         (internal memory & stream registry)
+ 6.  Class: CudaMem              (allocation descriptor)
+ 7.  Class: CudaCompiler         (kernel discovery / compilation / loading)
+ 8.  Class: CudaLauncher         (kernel execution)
+ 9.  Class: CudaFourier          (FFT / IFFT)
+ 10. Class: CudaLogger           (logging infrastructure)
+ 11. Kernel Directory Layout
+ 12. End-to-End Usage Examples
+ 13. Error Handling & Diagnostics
+ 14. Threading & Concurrency Notes
+
+================================================================================
+ 1. OVERVIEW
+================================================================================
+
+ AsynCUDA12.Runtime is a managed .NET wrapper around NVIDIA CUDA (via the
+ ManagedCuda libraries) that provides a high-level, asynchronous-friendly API
+ for:
+
+   - Selecting and initializing a CUDA device.
+   - Uploading (push) and downloading (pull) data between host and device.
+   - Allocating and freeing device memory, tracked through a central registry.
+   - Compiling CUDA C kernels (.cu) or raw kernel strings to PTX via NVRTC.
+   - Loading PTX modules and executing kernels over linear (1D) buffers and
+     images (2D buffers).
+   - Performing Fast Fourier Transforms (R2C / C2R), including async and
+     batched ("many") variants.
+   - Thread-safe logging to both an in-memory bindable list and a log file.
+
+ The library is designed so that a consumer typically only interacts with a
+ single entry-point type, "CudaService". All lower-level components are created
+ and coordinated by that facade.
+
+================================================================================
+ 2. ARCHITECTURE & COMPONENT MAP
+================================================================================
+
+ The runtime is organized as a facade over several specialized components:
+
+   +--------------------------------------------------------------+
+   |                        CudaService                           |
+   |  (public facade: device selection, push/pull, allocate/free) |
+   +----------------+-----------------+-------------+-------------+
+                    |                 |             |
+            +-------v------+   +------v------+  +---v--------+  +-----------+
+            | CudaRegister |   | CudaCompiler|  | CudaLauncher| | CudaFourier|
+            | (mem/streams)|   | (compile/   |  | (execute    | | (FFT/IFFT) |
+            |              |   |  load/parse)|  |  kernels)   | |            |
+            +-------+------+   +-------------+  +------+------+  +-----+-----+
+                    |                                  |              |
+                    |   produces / frees               | resolves     | allocates
+                    v                                  v args/memory  v via registry
+            +---------------+                   (CudaCompiler +        (CudaRegister)
+            |   CudaMem      |                    CudaRegister)
+            | (allocation    |
+            |  descriptor)   |
+            +---------------+
+
+   CudaLogger is a static, cross-cutting service used by all components.
+
+ Component responsibilities:
+
+   - CudaService  : Owns the PrimaryContext for the selected device. Exposes
+                    device discovery, initialization, and all memory transfer /
+                    allocation / free operations (sync + async). Every call is
+                    guarded by an "Online" availability check.
+
+   - CudaRegister : INTERNAL. Owns all device allocations (CudaMem) and CUDA
+                    streams. Performs allocation, host<->device transfers and
+                    freeing. Manages stream lifecycle and exposes bindable lists
+                    and counters for monitoring.
+
+   - CudaMem      : Descriptor object for one or more contiguous device buffers
+                    of the same element type. Tracks device pointers, native
+                    handles, per-buffer lengths, element type/size and totals.
+
+   - CudaCompiler : Discovers .cu sources and .ptx outputs, compiles kernels to
+                    PTX (NVRTC), loads/unloads PTX modules, and parses kernel
+                    signatures to map CUDA argument types to .NET types and
+                    build ordered argument arrays.
+
+   - CudaLauncher : Executes a loaded kernel over a linear buffer or an image,
+                    validating argument counts/types and configuring grid/block
+                    dimensions.
+
+   - CudaFourier  : Performs R2C forward and C2R inverse FFTs over registered
+                    memory (sync, async, and batched), plus result normalization.
+
+   - CudaLogger   : Static, thread-safe logger writing to an in-memory bindable
+                    list (for UI) and a timestamped log file.
+
+================================================================================
+ 3. CORE CONCEPTS
+================================================================================
+
+ 3.1 Native Handles vs Device Pointers
+ -------------------------------------
+   Device memory is referenced in two equivalent ways:
+     - CUdeviceptr : the ManagedCuda strong type for a device pointer.
+     - IntPtr/nint : the raw native handle (CUdeviceptr.Pointer).
+   The public API generally accepts the native handle (nint) as an
+   "indexPointer" to identify an allocation, while internally both forms are
+   stored on each CudaMem.
+
+ 3.2 Index Pointer
+ -----------------
+   For a grouped allocation (multiple buffers), the FIRST buffer's native
+   handle is the "IndexPointer". It is the primary key used to look up the
+   allocation in the registry and to identify it across push/pull/free calls.
+
+ 3.3 Memory Lifecycle
+ --------------------
+   Allocate / Push  -> creates a CudaMem and registers it in CudaRegister.
+   Pull             -> copies device data back to host; by default FREES the
+                       device memory unless "keep"/"keepBuffer" is true.
+   Free             -> releases device memory and removes the CudaMem from the
+                       registry.
+   Note: CudaMem.Dispose() only clears the descriptor's tracked metadata; the
+   actual device memory release is performed by CudaRegister.FreeMemory(...).
+
+ 3.4 Streams
+ -----------
+   Asynchronous transfers use CUDA streams managed by CudaRegister. Streams are
+   created lazily up to the device's AsyncEngineCount; beyond that, the
+   least-busy existing stream is reused. Each stream tracks an outstanding-
+   operation count; idle streams are disposed and removed.
+
+ 3.5 Kernels
+ -----------
+   A kernel is a CUDA C "__global__ void" function. Kernels are compiled to PTX
+   and loaded by name. The compiler parses the kernel signature to determine
+   the ordered argument list: pointer parameters (containing '*') map to IntPtr,
+   while scalar parameters map to int/float/double/char/bool/byte.
+
+================================================================================
+ 4. CLASS: CudaService   (public facade)
+================================================================================
+
+ Namespace : AsynCUDA12.Runtime
+ Type      : public class CudaService : IDisposable
+
+ PURPOSE
+   High-level public entry point. Owns the CUDA primary context for a selected
+   device and coordinates CudaRegister, CudaFourier, CudaCompiler and
+   CudaLauncher. Exposes device discovery, initialization, and memory transfer /
+   allocation / free operations in both synchronous and asynchronous forms.
+   Every operation is guarded by an online/availability check (Online).
+
+ ---- STATIC PROPERTIES ----
+
+   static int DeviceCount
+     Number of CUDA-capable devices on the system.
+
+   static Dictionary<int, CudaDeviceProperties> AvailableDevicesProps
+     Properties of every available device, keyed by device id.
+
+   static Version CudaDriverVersion
+     The installed CUDA driver version.
+
+   static bool SilenceLogging   { get; set; }   (default: false)
+     When true, log messages are suppressed from the in-memory UI list
+     (CudaLogger.LogMessages); file logging still occurs.
+
+ ---- INSTANCE PROPERTIES ----
+
+   int SelectedDeviceId         { get; }   (-1 when offline)
+   CudaDeviceProperties? SelectedDeviceProperties { get; }
+   internal PrimaryContext? Context { get; }
+   bool Online                  { get; }   true if Context != null and a device is selected
+   BindingList<string> DeviceEntries { get; }
+     Human-readable device descriptions: "[id] Name - NNNN MB".
+
+   long TotalAllocated          { get; }   total bytes currently allocated
+   int  RegisteredMemoryObjects { get; }   number of tracked allocations
+   int  ThreadsActive           { get; }   streams with outstanding operations
+   int  ThreadsIdle             { get; }   idle streams
+   int  MaxThreads              { get; }   device MaxThreadsPerMultiProcessor
+   BindingList<long> MemorySizesList   { get; }   allocation sizes (bytes)
+   BindingList<int>  StreamThreadsList { get; }   per-stream outstanding counts
+
+ ---- INTERNAL COMPONENT PROPERTIES ----
+
+   internal CudaRegister? Register { get; }
+   CudaFourier?  Fourier  { get; }
+   CudaCompiler? Compiler { get; }
+   CudaLauncher? Launcher { get; }
+
+ ---- INDEXERS ----
+
+   CudaMem? this[nint indexPointer]   -> allocation owning that handle, or null
+   CudaMem? this[Guid id]             -> allocation with that id, or null
+   CudaDeviceProperties? this[int deviceId]      -> device props, or null
+   CudaDeviceProperties? this[string deviceName] -> device props by name (CI), or null
+
+ ---- CONSTRUCTORS ----
+
+   CudaService(int preferredDeviceIndex = -1)
+     If preferredDeviceIndex >= 0, immediately initializes that device;
+     otherwise the service starts offline.
+
+   CudaService(string preferredDeviceName)
+     Initializes the device whose name matches (or a numeric id string).
+
+ ---- STATIC METHODS ----
+
+   static Dictionary<int, CudaDeviceProperties> GetAvailableDevicesProperties()
+     Enumerates all devices and returns their properties keyed by id.
+
+ ---- INSTANCE METHODS ----
+
+   void Dispose()
+     Disposes the context and all owned components (Launcher, Compiler,
+     Fourier, Register), resets SelectedDeviceId to -1.
+
+   bool Initialize(int deviceId = -1)
+     Creates the PrimaryContext and all components for the given device.
+     Disposes any prior context first. Returns true on success.
+
+   bool Initialize(string name, bool exactMatch = false)
+     Initializes by device name (or numeric id string). exactMatch=true
+     requires a case-insensitive exact match; otherwise substring match.
+     Returns true if a device was found and initialized.
+
+   --- Data transfer (single buffer) ---
+
+   CudaMem? PushData<T>(IEnumerable<T> data)                where T : unmanaged
+     Uploads host data to a single device buffer. Returns the registered
+     CudaMem, or null if offline / upload failed.
+
+   T[]? PullData<T>(nint indexPointer, bool keepBuffer = false)   where T : unmanaged
+   T[]? PullData<T>(CudaMem mem,       bool keepBuffer = false)   where T : unmanaged
+     Downloads a single buffer to the host. By default frees the device memory
+     (keepBuffer=false). Returns null if offline.
+
+   CudaMem? AllocateSingle<T>(int elementCount)             where T : unmanaged
+     Allocates one uninitialized device buffer. Returns null if offline.
+
+   --- Data transfer (groups / chunks) ---
+
+   CudaMem? PushChunks<T>(IEnumerable<T[]> data)            where T : unmanaged
+     Uploads several chunks as a group of buffers.
+
+   IEnumerable<T[]>? PullChunks<T>(nint indexPointer, bool keepBuffer = false) where T : unmanaged
+   IEnumerable<T[]>? PullChunks<T>(CudaMem mem,        bool keepBuffer = false) where T : unmanaged
+     Downloads a grouped allocation as separate chunks.
+
+   CudaMem? AllocateGroup<T>(nint[] lengths)                where T : unmanaged
+     Allocates a group of buffers (one per length).
+
+   --- Async variants ---
+
+   Task<CudaMem?> PushDataAsync<T>(IEnumerable<T> data)
+   Task<T[]?>     PullDataAsync<T>(nint indexPointer, bool keepBuffer = false)
+   Task<T[]?>     PullDataAsync<T>(CudaMem cudaMem,    bool keepBuffer = false)
+   Task<CudaMem?> AllocateSingleAsync<T>(int elementCount)
+   Task<CudaMem?> PushChunksAsync<T>(IEnumerable<T[]> data)
+   Task<IEnumerable<T[]>?> PullChunksAsync<T>(nint indexPointer, bool keepBuffer = false)
+   Task<IEnumerable<T[]>?> PullChunksAsync<T>(CudaMem mem,        bool keepBuffer = false)
+   Task<CudaMem?> AllocateGroupAsync<T>(nint[] lengths)
+     Asynchronous counterparts of the above. All return null if offline.
+
+   --- Free ---
+
+   long FreeMemory(CudaMem mem)
+   long FreeMemory(nint indexPointer)
+   long FreeMemory(Guid id)
+   Task<long> FreeMemoryAsync(Guid id)
+   Task<long> FreeMemoryAsync(nint indexPointer)
+     Release device memory. Return the number of bytes freed (0 if offline).
+
+ USAGE PATTERN
+   using var cuda = new CudaService(0);          // init device 0
+   if (!cuda.Online) return;
+   var mem = cuda.PushData(new float[] { 1, 2, 3 });
+   // ... process via cuda.Launcher / cuda.Fourier ...
+   float[]? result = cuda.PullData<float>(mem!.IndexPointer);
+
+================================================================================
+ 6. CLASS: CudaMem   (allocation descriptor)
+================================================================================
+
+ Namespace : AsynCUDA12.Runtime
+ Type      : public class CudaMem : IDisposable
+
+ PURPOSE
+   Managed descriptor for one or more contiguous CUDA device memory allocations.
+   A single instance describes either one buffer (single allocation) or several
+   buffers of the SAME element type (group / chunked allocation). It groups
+   device pointers, native handles, per-buffer lengths and the element type so
+   the buffer(s) can be tracked, transferred and freed as one unit.
+
+ ---- PROPERTIES ----
+
+   Guid  Id                { get; }   unique id used by the registry
+   CUdeviceptr[] DevicePointers { get; }   device pointers for every buffer
+   IntPtr[] Pointers       { get; }   native handles (same order as DevicePointers)
+   IntPtr[] Lengths        { get; }   element count of each buffer
+   IntPtr IndexPointer     { get; }   native handle of the first buffer (primary key)
+   IntPtr IndexLength      { get; }   element count of the first buffer
+   Type   ElementType      { get; }   .NET element type (e.g. float)
+   int    ElementSize      { get; }   size in bytes of one element
+   int    Count            { get; }   number of buffers
+   long   TotalLength      { get; }   total elements across all buffers
+   long   TotalSize        { get; }   total bytes (TotalLength * ElementSize)
+   string Message          { get; set; }   optional free-form status/diagnostic
+
+ ---- INDEXER ----
+
+   CUdeviceptr? this[IntPtr pointer]
+     Returns the CUdeviceptr matching the given native handle, or null if that
+     handle is not part of this allocation.
+
+ ---- CONSTRUCTORS ----
+
+   CudaMem(CUdeviceptr pointer, IntPtr length, Type type)
+     Describes a single device buffer.
+
+   CudaMem(CUdeviceptr[] pointers, IntPtr[] lengths, Type type)
+     Describes a group of buffers; pointers and lengths must be the same length.
+
+ ---- METHODS ----
+
+   void Dispose()
+     Resets the descriptor metadata to its empty state and suppresses
+     finalization. IMPORTANT: this clears tracked metadata ONLY; releasing the
+     underlying device memory is the responsibility of CudaRegister.FreeMemory.
+
+   (private) void UpdateProperties()
+     Recalculates ElementSize, Count, TotalLength, TotalSize, IndexPointer and
+     IndexLength from the current pointers, lengths and element type.
+
+================================================================================
+ 5. CLASS: CudaRegister   (internal memory & stream registry)
+================================================================================
+
+ Namespace : AsynCUDA12.Runtime
+ Type      : internal class CudaRegister : IDisposable
+
+ PURPOSE
+   Central registry that owns and tracks all CUDA device memory allocations and
+   CUDA streams for a context. It allocates, transfers (push/pull) and frees
+   memory, hands out and recycles streams for asynchronous operations, and
+   exposes bindable lists and counters for monitoring. Instances are internal
+   and are created and owned by CudaService.
+
+ ---- FIELDS ----
+
+   ConcurrentDictionary<Guid, CudaMem> Memory   all registered memory by id
+   BindingList<CudaMem> MemoryList              bindable view of registered memory
+   BindingList<long> _memorySizes               byte size of each allocation
+   ConcurrentDictionary<CudaStream, int> Streams  streams -> outstanding-op count
+   BindingList<int> _streamThreads              per-stream outstanding counts
+   PrimaryContext Context                       the operating context
+
+ ---- PROPERTIES ----
+
+   long TotalAllocated          total bytes across all tracked allocations
+   int  RegisteredMemoryObjects number of registered allocations
+   int  ThreadsActive           streams with outstanding-op count > 0
+   int  ThreadsIdle             streams with outstanding-op count <= 0
+   int  MaxThreads              device MaxThreadsPerMultiProcessor
+   BindingList<long> MemorySizesList     allocation sizes in bytes
+   BindingList<int>  StreamThreadsList   per-stream outstanding counts
+
+ ---- INDEXERS ----
+
+   CudaMem? this[nint indexPointer]  allocation containing the native handle, or null
+   CudaMem? this[Guid id]            allocation by id, or null
+   internal CudaStream? this[ulong id]  stream by CUDA stream id, or null
+
+ ---- CONSTRUCTOR ----
+
+   CudaRegister(PrimaryContext ctx)
+     Stores the context and makes it current.
+
+ ---- PRIVATE HELPERS ----
+
+   void ReleaseStream(CudaStream stream, bool removeWhenIdle = true)
+     Decrements a stream's outstanding-op count and disposes/removes it once it
+     becomes idle; also cleans up any other idle streams and refreshes the
+     bindable stream-thread list.
+
+   void AddMemorySize(long size)
+     Thread-safely adds an allocation size to MemorySizesList.
+
+   void RefreshStreamThreads()
+     Rebuilds StreamThreadsList from the current per-stream counts.
+
+ ---- FREE METHODS ----
+
+   long FreeMemory(CudaMem mem)
+   long FreeMemory(IntPtr indexPointer)
+   long FreeMemory(Guid id)
+     Free all device buffers of an allocation and remove it from the registry.
+     Return the number of bytes freed. A NEGATIVE value from the CudaMem overload
+     indicates the device memory was released but the object was not found in the
+     registry; the IntPtr/Guid overloads return 0 when no allocation matches.
+
+ ---- STREAM METHODS ----
+
+   internal ulong? CreateStream()
+     Creates, synchronizes and registers a new CUDA stream. Returns the new
+     stream id, or null on failure.
+
+   CudaStream? GetStream(ulong? id = null)
+     Returns a usable stream. With an id, returns the matching stream. Without
+     an id, creates a new stream while the stream count is below the device's
+     AsyncEngineCount, otherwise reuses the least-busy existing stream.
+
+   IEnumerable<CudaStream>? GetManyStreams(int maxCount = 0, IEnumerable<ulong>? ids = null)
+   Task<IEnumerable<CudaStream>?> GetManyStreamsAsync(int maxCount = 0, IEnumerable<ulong>? ids = null)
+     Acquire multiple streams at once, creating/registering as needed. When
+     maxCount <= 0, fills up to the remaining thread capacity. Returns null if
+     any stream could not be created/retrieved.
+
+ ---- ALLOCATION METHODS ----
+
+   CudaMem? AllocateSingle<T>(IntPtr length)            where T : unmanaged
+   Task<CudaMem?> AllocateSingleAsync<T>(IntPtr length) where T : unmanaged
+     Allocate a single uninitialized buffer and register it. Return null on
+     failure or non-positive length.
+
+   CudaMem? AllocateGroup<T>(IntPtr[] lengths)            where T : unmanaged
+   Task<CudaMem?> AllocateGroupAsync<T>(IntPtr[] lengths) where T : unmanaged
+     Allocate a group of buffers (one per length) and register as one object.
+
+ ---- PUSH METHODS ----
+
+   CudaMem? PushData<T>(IEnumerable<T> data)                          where T : unmanaged
+     Copy host data to a new buffer and register it.
+
+   CudaMem? PushChunks<T>(IEnumerable<IEnumerable<T>> chunks)          where T : unmanaged
+     Copy several chunks to a group of buffers and register them.
+
+   Task<CudaMem?> PushDataAsync<T>(IEnumerable<T> data, ulong? id = null)             where T : unmanaged
+   Task<CudaMem?> PushChunksAsync<T>(IEnumerable<IEnumerable<T>> chunks, ulong? id = null) where T : unmanaged
+     Stream-based async uploads. Optional id selects a specific stream.
+
+ ---- PULL METHODS ----
+
+   T[] PullData<T>(IntPtr indexPointer, bool keep = false)        where T : unmanaged
+     Copy a single buffer back to host. Frees device memory unless keep=true.
+     Returns an empty array if not found or copy failed.
+
+   List<T[]> PullChunks<T>(IntPtr indexPointer, bool keep = false) where T : unmanaged
+     Copy all buffers of a grouped allocation back to host as separate arrays.
+
+   Task<T[]> PullDataAsync<T>(IntPtr indexPointer, bool keep = false, ulong? id = null)      where T : unmanaged
+   Task<List<T[]>> PullChunksAsync<T>(IntPtr indexPointer, bool keep = false, ulong? id = null) where T : unmanaged
+     Async downloads using native cuMemcpyAsync on a CUDA stream. PullChunksAsync
+     falls back to a synchronous copy when no stream is available.
+
+ ---- DISPOSE ----
+
+   void Dispose()
+     Frees all registered device memory allocations (via FreeMemory), disposes
+     all registered streams, clears the internal stream and size tracking lists,
+     and suppresses finalization. This ensures no device (VRAM) allocation is
+     leaked when the owning CudaService is disposed.
+
+ CONCURRENCY
+   - Memory and Streams are ConcurrentDictionary instances.
+   - _memorySizes and _streamThreads are guarded by their own locks.
+   - Async paths increment the chosen stream's count, then release it in a
+     finally block; lingering idle streams are cleaned up to keep ThreadsActive
+     accurate.
+
+================================================================================
+ 7. CLASS: CudaCompiler   (kernel discovery / compilation / loading)
+================================================================================
+
+ Namespace : AsynCUDA12.Runtime
+ Type      : public class CudaCompiler : IDisposable
+
+ PURPOSE
+   Discovers, compiles, loads and inspects CUDA kernels. Manages the on-disk
+   kernel directory structure (CU sources, PTX output and logs), compiles .cu
+   files or raw kernel strings to PTX via NVRTC, loads PTX modules into the CUDA
+   context, and parses kernel signatures to map CUDA argument types to .NET types
+   and build ordered argument arrays for execution.
+
+ ---- FIELDS / STATE ----
+
+   PrimaryContext Context        the context used for compilation/loading
+   internal CudaKernel? Kernel   currently loaded kernel, or null
+   string? KernelName            name of the loaded kernel, or null
+   string? KernelFile            PTX file path of the loaded kernel, or null
+   string? KernelCode            source (.cu) text of the loaded kernel, or null
+
+ ---- STATIC PROPERTIES ----
+
+   static string KernelPath          resolved root dir containing CU/PTX/Logs
+   static List<string> SourceFiles   available .cu files (via GetCuFiles)
+   static List<string> CompiledFiles available .ptx files (via GetPtxFiles)
+
+ ---- CONSTRUCTOR ----
+
+   CudaCompiler(PrimaryContext context)
+     Stores the context, ensures the kernel directory structure (KernelPath plus
+     CU, PTX, and Logs subfolders) exists (falling back to a temp path on
+     failure), and compiles all discovered kernels (CompileAll(false, true)).
+
+ ---- DIRECTORY / FILE HELPERS ----
+
+   (private static) bool TryCreateDirectory(string path, out string createdPath)
+     Attempts to create a directory; reports the created path on success.
+
+   (private static) string EnsureKernelDirectory(string? differentPath = null)
+     Resolves a writable kernel directory, preferring a "Kernels" folder inside
+     the AsynCUDA12.Runtime location, falling back to the base directory or a
+     temp path.
+
+   (private static) byte[] ReadAllBytesWithRetry(string path, int retries = 3, int delayMs = 50)
+     Reads a file with retry on IOException (handles transient file locks).
+
+   static List<string> GetPtxFiles(string? path = null)
+   static List<string> GetCuFiles(string? path = null)
+     Return the full paths of .ptx / .cu files in the given directory (defaults
+     to KernelPath/PTX and KernelPath/CU).
+
+ ---- KERNEL LOADING ----
+
+   void UnloadKernel()
+     Unloads the current kernel and clears KernelName/KernelFile/KernelCode.
+
+   CudaKernel? LoadKernel(string kernelName, bool silent = false)
+     Loads a kernel from a PTX file path or by name (resolving PTX under
+     KernelPath/PTX and co-located/CU source for KernelCode). Unloads any prior
+     kernel first. Returns the loaded kernel, or null on failure. Writes a load
+     log on error unless silent.
+
+ ---- COMPILATION ----
+
+   void CompileAll(bool silent = false, bool logErrors = false)
+     Compiles every source file in SourceFiles; logs failures when logErrors.
+
+   string? CompileKernel(string filepath, bool silent = false)
+     Compiles a single .cu file (or delegates to CompileString when the
+     extension is not .cu). Writes PTX to KernelPath/PTX and a compile log to
+     KernelPath/Logs. Returns the PTX path, or null on failure.
+
+   string? CompileString(string kernelString, bool silent = false)
+     Compiles a raw kernel string. Derives the kernel name from the
+     "void <name>(" signature, saves the source as a .cu file, writes PTX and a
+     log. Returns the PTX path, or null on failure.
+
+   string? PrecompileKernelString(string kernelString, bool silent = false)
+     Performs a lightweight validity check on a raw kernel string: requires
+     extern "C", __global__, void, an int/long length parameter, balanced
+     {}/()/[] brackets, and recommends blockIdx.x/blockDim.x/threadIdx.x.
+     Returns the extracted kernel name when valid; otherwise null.
+
+ ---- ARGUMENT INSPECTION & MERGING ----
+
+   Type GetArgumentType(string typeName)
+     Maps a CUDA type name to a .NET Type. Any pointer type (contains '*') maps
+     to IntPtr; otherwise int/float/double/char/bool/byte/void (default void).
+
+   Dictionary<string, Type> GetArguments(string? kernelCode = null, bool silent = false)
+     Parses the kernel signature (resolving from a name, .cu path, .ptx path, the
+     loaded KernelCode, or a co-located .cu) and returns an ordered map of
+     argument name -> .NET Type. Returns an empty map when the signature cannot
+     be resolved.
+
+   int GetPointerArgsCount(string? kernelCode = null, bool silent = false)
+     Counts the IntPtr (pointer) arguments of the kernel.
+
+   object[] MergeArgumentsRaw(object[] arguments)
+     Builds an ordered kernel-argument array by matching provided values to the
+     kernel's argument names; unmatched slots default to 0.
+
+   object[] MergeArgumentsAudio(CUdeviceptr inputPointer, CUdeviceptr outputPointer,
+                                int sampleRate = 44100, int channels = 2, int bitdepth = 32,
+                                Dictionary<string, object>? namedArguments = null)
+     Builds an ordered argument array for audio kernels: assigns the first two
+     pointer parameters to input/output, fills sample/channel/bit parameters by
+     name, and applies optional named arguments; unmatched slots default to 0.
+
+   object[] MergeArgumentsImage(CUdeviceptr inputPointer, CUdeviceptr outputPointer,
+                                int width, int height, int channels, int bitdepth,
+                                object[] arguments, bool silent = false)
+     Builds an ordered argument array for image kernels: assigns the first two
+     pointer parameters to input/output, fills width/height/channels/bit
+     parameters by name, and matches remaining values; unmatched slots default
+     to 0.
+
+ ---- DISPOSE ----
+
+   void Dispose()
+     Suppresses finalization. (Kernel unloading is performed via UnloadKernel /
+     by the owning service during teardown.)
+
+================================================================================
+ 8. CLASS: CudaLauncher   (kernel execution)
+================================================================================
+
+ Namespace : AsynCUDA12.Runtime
+ Type      : public class CudaLauncher : IDisposable
+
+ PURPOSE
+   Executes compiled CUDA kernels against device memory. Resolves kernel
+   arguments, validates their count and types, configures the launch grid/block
+   dimensions and runs the kernel, supporting both linear (1D) workloads and
+   image (2D) workloads.
+
+ ---- FIELDS / STATE ----
+
+   PrimaryContext Context     the context kernels are launched on
+   CudaRegister Register      registry used to resolve device memory
+   CudaFourier Fourier        Fourier helper for transform-based workloads
+   CudaCompiler Compiler      compiler used to load kernels and inspect signatures
+   (private) CudaKernel? Kernel   the currently loaded kernel (from Compiler)
+   string? KernelName             name of the loaded kernel, or null
+
+ ---- CONSTRUCTOR ----
+
+   internal CudaLauncher(PrimaryContext ctx, CudaRegister register,
+                         CudaFourier fourier, CudaCompiler compiler)
+     Stores the collaborating components.
+
+ ---- METHODS (sync) ----
+
+   IntPtr? ExecuteLinearKernel(string? kernelName, IntPtr pointer,
+                               object[] arguments, int length)
+     Executes a kernel over a 1D buffer. Loads the kernel if none is loaded,
+     validates the non-pointer scalar arguments against the kernel signature,
+     computes a 1D grid using a 256-thread block size, runs the kernel and
+     synchronizes. Returns the input pointer on success; otherwise null.
+
+   IntPtr? ExecuteImageKernel(string? kernelName, IntPtr pointer,
+                              object[] arguments, int width, int height,
+                              int channels = 4, int bitdepth = 8)
+     Executes a kernel over a 2D image buffer in-place. Loads the kernel if
+     needed, validates user-supplied scalar arguments (excluding the two image
+     pointers and the width/height/channels/bit parameters, which are injected
+     automatically), configures an 8x8 2D block layout, runs the kernel and
+     synchronizes. Returns the input pointer on success; otherwise null.
+
+ ---- METHODS (async) ----
+
+   Task<IntPtr?> ExecuteLinearKernelAsync(string? kernelName, IntPtr pointer,
+                                          object[] arguments, int length)
+   Task<IntPtr?> ExecuteImageKernelAsync(string? kernelName, IntPtr pointer,
+                                         object[] arguments, int width, int height,
+                                         int channels = 4, int bitdepth = 8)
+     Run the corresponding synchronous method on a background thread.
+
+ ---- DISPOSE ----
+
+   void Dispose()
+     Suppresses finalization. The launcher does not own the context or the
+     collaborating components, so they are not disposed here.
+
+ NOTES
+   - Argument validation: the expected user arguments are the kernel parameters
+     that are NOT pointers (and, for images, not the auto-injected size/format
+     parameters). A count or type mismatch is logged and the call returns null.
+   - Image kernels operate in-place: the input buffer is reused as the output.
+
+================================================================================
+ 9. CLASS: CudaFourier   (FFT / IFFT)
+================================================================================
+
+ Namespace : AsynCUDA12.Runtime
+ Type      : public class CudaFourier : IDisposable
+
+ PURPOSE
+   Provides GPU-accelerated Fast Fourier Transform operations for registered
+   device memory. Supports Real-to-Complex (R2C) forward transforms and
+   Complex-to-Real (C2R) inverse transforms in synchronous, asynchronous
+   (stream-based) and batched ("many") variants, plus helpers to normalize
+   inverse-transform results. Allocations are obtained from and released through
+   the associated CudaRegister.
+
+ ---- FIELDS ----
+
+   PrimaryContext CTX     context used for transform execution/synchronization
+   CudaRegister Register  registry used to allocate/free transform buffers
+
+ ---- CONSTRUCTOR ----
+
+   internal CudaFourier(PrimaryContext ctx, CudaRegister register)
+     Stores the context and registry.
+
+ ---- TRANSFORMS (sync) ----
+
+   IntPtr PerformFft(IntPtr indexPointer, bool keep = false)
+     R2C forward FFT. Input memory must be float; output is allocated as float2.
+     Builds one plan when all buffer lengths are equal, otherwise a plan per
+     buffer. Frees the input unless keep=true. Returns the output index pointer,
+     the input pointer on recoverable failure, or IntPtr.Zero on invalid input.
+
+   IntPtr PerformIfft(IntPtr indexPointer, bool keep = false)
+     C2R inverse FFT. Input memory must be float2; output is allocated as float.
+     Same planning/keep/return semantics as PerformFft.
+
+ ---- NORMALIZATION ----
+
+   T[] NormalizeIfftResult<T>(IEnumerable<T> data)               where T : unmanaged
+     Scales IFFT output by 1/N (element count). Specialized for float and double;
+     other types are returned unchanged.
+
+ ---- TRANSFORMS (async) ----
+
+   Task<IntPtr> PerformFftAsync(IntPtr pointer, bool keep = false)
+   Task<IntPtr> PerformIfftAsync(IntPtr pointer, bool keep = false)
+     Stream-based R2C / C2R transforms using a stream obtained from the registry.
+
+   Task<T[]> NormalizeIfftResultAsync<T>(IEnumerable<T> data)    where T : unmanaged
+     Runs NormalizeIfftResult on a background thread.
+
+ ---- BATCHED ("MANY") TRANSFORMS (async) ----
+
+   Task<IntPtr> PerformFftManyAsync(IntPtr indexPointer, bool keep = false)
+   Task<IntPtr> PerformIfftManyAsync(IntPtr indexPointer, bool keep = false)
+     Batched R2C / C2R transforms using CudaFFTPlanMany over all buffers of a
+     grouped allocation on a single stream.
+
+   (internal) T[][] NormalizeIfftManyResult<T>(IEnumerable<T[]> data)  where T : unmanaged
+   Task<T[][]> NormalizeIfftManyResultAsync<T>(IEnumerable<T[]> data)   where T : unmanaged
+     Normalize each array in a collection of IFFT results by its own 1/N factor
+     (float/double specialized; other types copied unchanged).
+
+ ---- DISPOSE ----
+
+   void Dispose()
+     Suppresses finalization. Buffers are owned by the registry, not the Fourier
+     helper.
+
+================================================================================
+ 10. CLASS: CudaLogger   (logging infrastructure)
+================================================================================
+
+ Namespace : AsynCUDA12.Runtime
+ Type      : public static class CudaLogger
+
+ PURPOSE
+   Thread-safe, static logging facility for the runtime. Messages are kept in
+   memory (for UI data-binding) and simultaneously appended to a timestamped log
+   file. The log file is created once per process; the directory is resolved
+   automatically relative to the runtime assembly.
+
+ ---- STATE ----
+
+   static readonly ConcurrentDictionary<DateTime, string> LogEntries
+     Every logged message keyed by the time it was recorded.
+
+   static readonly BindingList<string> LogMessages
+     Formatted log lines, exposed as a bindable list for UI consumers. Population
+     is suppressed when CudaService.SilenceLogging is true.
+
+   static string LogFilePath  { get; }   the current log file path
+
+ ---- STATIC CONSTRUCTOR ----
+
+   static CudaLogger()
+     Resolves the log directory and creates a fresh log file, clearing any
+     existing *.log files in that directory.
+
+ ---- PRIVATE HELPERS ----
+
+   (private static) bool TryCreateDirectory(string path, out string createdPath)
+   (private static) string EnsureLogDirectory(string? differentPath = null)
+     Resolve a writable log directory, preferring a "Logs" folder inside the
+     AsynCUDA12.Runtime location and falling back to the base/temp directories.
+
+   (private static) void CreateLog(string logDir,
+                                   string dateFormat = "yyyy-MM-dd_HH-mm-ss",
+                                   bool clearExisting = false)
+     Create a timestamped log file (optionally deleting existing logs) and write
+     a header with assembly, .NET, build, OS and CUDA environment info.
+
+   (private static) string FormatTimestamp(string format)
+     Format the current local time, falling back to a default time format if the
+     supplied format is invalid.
+
+ ---- LOGGING METHODS ----
+
+   static void Log(string message, string format = "HH:mm:ss.fff")
+   static Task LogAsync(string message, string format = "HH:mm:ss.fff",
+                        CancellationToken cancellationToken = default)
+     Record a message in memory and append a timestamped line to the log file.
+     A null message is ignored.
+
+   static void Log(Exception ex, string format = "HH:mm:ss.fff")
+   static Task LogAsync(Exception ex, string format = "HH:mm:ss.fff",
+                        CancellationToken cancellationToken = default)
+     Log an exception by flattening its message with up to ten nested
+     inner-exception messages.
+
+   static void Log(string message, Exception ex, string format = "HH:mm:ss.fff")
+   static Task LogAsync(string message, Exception ex, string format = "HH:mm:ss.fff",
+                        CancellationToken cancellationToken = default)
+     Log a contextual message combined with an exception and its chain of
+     inner-exception messages.
+
+ CONCURRENCY
+   All writes to the in-memory collections and the log file are guarded by a
+   private lock; file-append failures are swallowed so logging never throws.
+
+================================================================================
+ 11. KERNEL DIRECTORY LAYOUT
+================================================================================
+
+ CudaCompiler.KernelPath resolves to a "Kernels" directory (preferring one
+ inside the AsynCUDA12.Runtime location, otherwise the base directory or a temp
+ fallback). It contains:
+
+   Kernels/
+     CU/      *.cu   CUDA C source files (input to NVRTC)
+     PTX/     *.ptx  compiled PTX modules (output; loaded at runtime)
+     Logs/    *.log  per-kernel compile/load logs
+
+ Workflow:
+   - On construction, CudaCompiler ensures these folders exist and compiles all
+     *.cu files found under CU/ into PTX modules under PTX/.
+   - LoadKernel resolves a PTX module by name (PTX/<name>.ptx) and, when present,
+     reads the co-located/CU source (CU/<name>.cu) into KernelCode for argument
+     parsing.
+
+================================================================================
+ 12. END-TO-END USAGE EXAMPLES
+================================================================================
+
+ 12.1 Initialize, push, run a linear kernel, pull, free
+ ------------------------------------------------------
+   using var cuda = new CudaService(0);
+   if (!cuda.Online) return;
+
+   // Upload data
+   var input = new float[] { 1f, 2f, 3f, 4f };
+   CudaMem? mem = cuda.PushData(input);
+   if (mem == null) return;
+
+   // Execute a kernel that takes (float* data, int length, float factor)
+   var args = new object[] { input.Length, 2.0f };
+   IntPtr? outPtr = cuda.Launcher!.ExecuteLinearKernel(
+       "DoubleValues", mem.IndexPointer, args, input.Length);
+
+   // Download result (frees device memory by default)
+   float[]? result = outPtr.HasValue
+       ? cuda.PullData<float>(outPtr.Value)
+       : null;
+
+ 12.2 Image kernel (in-place)
+ ----------------------------
+   var pixels = new byte[width * height * 4];
+   CudaMem? img = cuda.PushData(pixels);
+   cuda.Launcher!.ExecuteImageKernel(
+       "InvertImage", img!.IndexPointer, Array.Empty<object>(),
+       width, height, channels: 4, bitdepth: 8);
+   byte[]? inverted = cuda.PullData<byte>(img.IndexPointer);
+
+ 12.3 FFT round-trip
+ -------------------
+   CudaMem? signal = cuda.PushData(samples);          // float[]
+   IntPtr spectrum = cuda.Fourier!.PerformFft(signal!.IndexPointer);
+   // ... process spectrum (float2) ...
+   IntPtr restored = cuda.Fourier.PerformIfft(spectrum);
+   float[]? outSamples = cuda.PullData<float>(restored);
+   float[] normalized = cuda.Fourier.NormalizeIfftResult(outSamples!);
+
+ 12.4 Asynchronous transfer
+ --------------------------
+   CudaMem? mem = await cuda.PushDataAsync(bigArray);
+   // ... compute ...
+   float[]? data = await cuda.PullDataAsync<float>(mem!.IndexPointer);
+
+================================================================================
+ 13. ERROR HANDLING & DIAGNOSTICS
+================================================================================
+
+ - Offline guard: every CudaService memory/transfer call checks Online. When the
+   service is offline (no context / no device), the call logs a message and
+   returns null (or 0 for free operations).
+
+ - Return-value conventions:
+     * Push/Allocate    : return CudaMem or null on failure.
+     * PullData         : returns an empty array on failure/not-found.
+     * PullChunks       : returns an empty list on failure/not-found.
+     * Transforms       : return the output index pointer on success, the input
+                          pointer on recoverable failure, or IntPtr.Zero on
+                          invalid input.
+     * FreeMemory       : returns bytes freed; 0 when not found/offline; the
+                          CudaMem overload may return a negative value when the
+                          device memory was freed but the object was not in the
+                          registry.
+
+ - Logging: failures are recorded via CudaLogger (in-memory + log file).
+   Kernel compile/load errors additionally write a .log file under Kernels/Logs.
+
+ - Validation: CudaLauncher validates argument count and assignability before
+   launching; mismatches are logged and result in a null return.
+
+================================================================================
+ 14. THREADING & CONCURRENCY NOTES
+================================================================================
+
+ - CudaRegister uses ConcurrentDictionary for memory and streams; the bindable
+   size/thread lists are guarded by dedicated locks.
+
+ - Async transfer/allocation paths acquire a stream, increment its outstanding-
+   operation count, and release it in a finally block. Idle streams are disposed
+   and removed to keep ThreadsActive/ThreadsIdle accurate.
+
+ - Stream creation is bounded by the device's AsyncEngineCount; beyond that, the
+   least-busy existing stream is reused.
+
+ - Context affinity: async operations call Context.SetCurrent() on their worker
+   thread before issuing CUDA work.
+
+ - CudaLogger serializes all writes under a single lock and never throws on
+   file I/O errors.
+
+ - The *Async wrappers in CudaService and CudaLauncher offload the corresponding
+   synchronous work via Task.Run; the underlying CUDA calls remain governed by
+   the context and the registry's stream management.
+
+================================================================================
+ END OF DOCUMENT
+================================================================================
+
+
+
+

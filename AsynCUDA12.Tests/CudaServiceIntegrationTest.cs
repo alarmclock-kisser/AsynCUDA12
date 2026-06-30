@@ -6,29 +6,26 @@ namespace AsynCUDA12.Tests
 	[TestClass]
 	public sealed class CudaServiceIntegrationTest
 	{
-		private readonly CudaService Service = new(-1);
+		private CudaService Service = null!;
 
 
 		[TestInitialize]
 		public void Initialize()
 		{
-			// Init first CUDA device [0] if devices are available
-			if (CudaService.DeviceCount > 0)
-			{
-				Assert.IsTrue(this.Service.SelectedDeviceId == -1);
-			}
-			else
-			{
-				Assert.Inconclusive("No CUDA devices available.");
-			}
+			// Skip (inconclusive) on machines without a usable CUDA driver/device. The CudaService
+			// constructor enumerates devices eagerly, so it must only be created after this guard.
+			GpuDatabase.TestData.RequireCuda();
+
+			this.Service = new CudaService(-1);
+			Assert.IsTrue(this.Service.SelectedDeviceId == -1);
 		}
 
 		[TestCleanup]
 		public void Cleanup()
 		{
-			this.Service.Dispose();
+			this.Service?.Dispose();
 
-			Assert.IsTrue(this.Service.SelectedDeviceId == -1);
+			Assert.IsTrue((this.Service?.SelectedDeviceId ?? -1) == -1);
 		}
 
 

@@ -1,0 +1,4 @@
+# Copilot Instructions
+
+## Projektrichtlinien
+- In the AsynCUDA12 solution, all MSTest test classes that use CudaService (CudaServiceIntegrationTest, CudaCompilerIntegrationTest, CudaFourierIntegrationTest, CudaLauncherIntegrationTest, CudaRegisterIntegrationTest, and the GpuDatabase tests) must NOT construct CudaService in a field initializer, because the CudaService constructor eagerly enumerates devices and throws DllNotFoundException('nvcuda') on GPU-less machines. Instead, declare the field as 'private CudaService Service = null!;', call TestData.RequireCuda() first in [TestInitialize], then construct the service, and make [TestCleanup] null-safe (this.Service?.Dispose()). Tests must never construct a CudaService outside a CUDA-availability guard; use the static CudaService.DeviceCount inside try/catch to detect availability and Assert.Inconclusive to skip GPU tests on GPU-less DEV systems.

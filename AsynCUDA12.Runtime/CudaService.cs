@@ -8,23 +8,42 @@ using ManagedCuda;
 
 namespace AsynCUDA12.Runtime
 {
+	/// <summary>
+	/// High-level public facade for the AsynCUDA12 runtime. A <see cref="CudaService"/> owns the CUDA primary
+	/// context for a selected device and coordinates the underlying components (<see cref="CudaRegister"/>,
+	/// <see cref="CudaFourier"/>, <see cref="CudaCompiler"/> and <see cref="CudaLauncher"/>). It exposes device
+	/// discovery, initialization, memory transfer (push/pull), allocation and free operations in both synchronous
+	/// and asynchronous forms, guarding every call with an online/availability check.
+	/// </summary>
 	public class CudaService : IDisposable
 	{
 		// Static CUDA properties
+		/// <summary>Gets the number of CUDA-capable devices available on the system.</summary>
 		public static int DeviceCount => CudaContext.GetDeviceCount();
+
+		/// <summary>Gets the properties of every available device keyed by device id.</summary>
 		public static Dictionary<int, CudaDeviceProperties> AvailableDevicesProps => GetAvailableDevicesProperties();
 
+		/// <summary>Gets the installed CUDA driver version.</summary>
 		public static Version CudaDriverVersion => CudaContext.GetDriverVersion();
 
+		/// <summary>Gets or sets a value indicating whether log messages are suppressed from the in-memory UI list.</summary>
 		public static bool SilenceLogging { get; set; } = false;
 
 		// Instance Properties
+		/// <summary>Gets the id of the currently selected device, or -1 if the service is offline.</summary>
 		public int SelectedDeviceId { get; private set; } = -1;
+
+		/// <summary>Gets the properties of the currently selected device, or <c>null</c> if none is selected.</summary>
 		public CudaDeviceProperties? SelectedDeviceProperties => this[this.SelectedDeviceId];
 
+		/// <summary>Gets the CUDA primary context backing this service, or <c>null</c> when offline.</summary>
 		internal PrimaryContext? Context { get; private set; } = null;
+
+		/// <summary>Gets a value indicating whether the service has an initialized context and a valid selected device.</summary>
 		public bool Online => this.Context != null && this.SelectedDeviceId >= 0;
 
+		/// <summary>Gets a bindable list of human-readable descriptions of the available devices.</summary>
 		public BindingList<string> DeviceEntries { get; private set; } = new BindingList<string>(
 			GetAvailableDevicesProperties()
 			.Select(kv => $"[{kv.Key}] {kv.Value.DeviceName} - {kv.Value.TotalGlobalMemory / (1024 * 1024)} MB")
@@ -34,35 +53,68 @@ namespace AsynCUDA12.Runtime
 
 
 		// Accessors
+		/// <summary>Gets the registered memory object that owns the given native handle, or <c>null</c>.</summary>
+		/// <param name="indexPointer">The native handle to look up.</param>
 		public CudaMem? this[nint indexPointer] => this.Register?[indexPointer];
+
+		/// <summary>Gets the registered memory object with the given id, or <c>null</c>.</summary>
+		/// <param name="id">The unique id of the memory object.</param>
 		public CudaMem? this[Guid id] => this.Register?[id];
 
+		/// <summary>Gets the total number of bytes currently allocated by the registry.</summary>
 		public long TotalAllocated => this.Register?.TotalAllocated ?? 0;
+
+		/// <summary>Gets the number of registered memory objects.</summary>
 		public int RegisteredMemoryObjects => this.Register?.RegisteredMemoryObjects ?? 0;
+
+		/// <summary>Gets the number of streams with at least one outstanding operation.</summary>
 		public int ThreadsActive => this.Register?.ThreadsActive ?? 0;
+
+		/// <summary>Gets the number of idle streams.</summary>
 		public int ThreadsIdle => this.Register?.ThreadsIdle ?? 0;
 
+		/// <summary>Gets the maximum number of threads per multiprocessor reported by the active device.</summary>
 		public int MaxThreads => this.Register?.MaxThreads ?? 0;
 
 		private static readonly BindingList<long> EmptyMemorySizes = new();
 		private static readonly BindingList<int> EmptyStreamThreads = new();
+
+		/// <summary>Gets the bindable list of allocation sizes (bytes), or an empty list when offline.</summary>
 		public BindingList<long> MemorySizesList => this.Register?.MemorySizesList ?? EmptyMemorySizes;
+
+		/// <summary>Gets the bindable list of per-stream outstanding-operation counts, or an empty list when offline.</summary>
 		public BindingList<int> StreamThreadsList => this.Register?.StreamThreadsList ?? EmptyStreamThreads;
 
 
 		// Fields
+		/// <summary>The memory and stream registry; created during initialization.</summary>
 		internal CudaRegister? Register { get; private set; } = null;
+
+		/// <summary>The Fourier transform helper; created during initialization.</summary>
 		public CudaFourier? Fourier { get; private set; } = null;
+
+		/// <summary>The kernel compiler/loader; created during initialization.</summary>
 		public CudaCompiler? Compiler { get; private set; } = null;
+
+		/// <summary>The kernel launcher; created during initialization.</summary>
 		public CudaLauncher? Launcher { get; private set; } = null;
 
 
 
 		// Enumerables
+		/// <summary>Gets the properties of the device with the given id, or <c>null</c> if it does not exist.</summary>
+		/// <param name="deviceId">The device id to look up.</param>
 		public CudaDeviceProperties? this[int deviceId] => GetAvailableDevicesProperties().GetValueOrDefault(deviceId);
+
+		/// <summary>Gets the properties of the device with the given name (case-insensitive), or <c>null</c> if not found.</summary>
+		/// <param name="deviceName">The device name to look up.</param>
 		public CudaDeviceProperties? this[string deviceName] => GetAvailableDevicesProperties().Values.FirstOrDefault(p => p.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase));
 
 		// Ctor
+		/// <summary>
+		/// Initializes a new instance of the <see cref="CudaService"/> class, optionally initializing a device immediately.
+		/// </summary>
+		/// <param name="preferredDeviceIndex">The device id to initialize; when negative, the service starts offline.</param>
 		public CudaService(int preferredDeviceIndex = -1)
 		{
 			if (preferredDeviceIndex >= 0)
@@ -71,6 +123,10 @@ namespace AsynCUDA12.Runtime
 			}
 		}
 
+		/// <summary>
+		/// Initializes a new instance of the <see cref="CudaService"/> class and initializes the device matching the given name.
+		/// </summary>
+		/// <param name="preferredDeviceName">The name (or id string) of the device to initialize.</param>
 		public CudaService(string preferredDeviceName)
 		{
 			if (!string.IsNullOrWhiteSpace(preferredDeviceName))
@@ -82,6 +138,10 @@ namespace AsynCUDA12.Runtime
 
 
 		// Methods (static)
+		/// <summary>
+		/// Enumerates all CUDA-capable devices and returns their properties keyed by device id.
+		/// </summary>
+		/// <returns>A dictionary mapping each device id to its <see cref="CudaDeviceProperties"/>.</returns>
 		public static Dictionary<int, CudaDeviceProperties> GetAvailableDevicesProperties()
 		{
 			var deviceProps = new Dictionary<int, CudaDeviceProperties>();
@@ -97,6 +157,10 @@ namespace AsynCUDA12.Runtime
 
 
 		// Methods (instance)
+		/// <summary>
+		/// Disposes the CUDA context and all owned components (launcher, compiler, Fourier helper and registry),
+		/// resets the selected device and suppresses finalization.
+		/// </summary>
 		public void Dispose()
 		{
 			if (this.Context != null)
@@ -127,6 +191,12 @@ namespace AsynCUDA12.Runtime
 			GC.SuppressFinalize(this);
 		}
 
+		/// <summary>
+		/// Initializes the service on the specified device id, creating the primary context and all dependent components.
+		/// Any previously initialized context is disposed first.
+		/// </summary>
+		/// <param name="deviceId">The id of the device to initialize.</param>
+		/// <returns><c>true</c> if initialization succeeded; otherwise <c>false</c>.</returns>
 		public bool Initialize(int deviceId = -1)
 		{
 			if (deviceId < 0 || deviceId >= DeviceCount || DeviceCount <= 0)
@@ -176,6 +246,12 @@ namespace AsynCUDA12.Runtime
 			return true;
 		}
 
+		/// <summary>
+		/// Initializes the service on the device that matches the given name. The name may also be a numeric id string.
+		/// </summary>
+		/// <param name="name">The device name to match, or a numeric id as a string.</param>
+		/// <param name="exactMatch">If <c>true</c>, requires an exact (case-insensitive) name match; otherwise matches by substring.</param>
+		/// <returns><c>true</c> if a device was found and initialized; otherwise <c>false</c>.</returns>
 		public bool Initialize(string name, bool exactMatch = false)
 		{
 			int index = -1;
@@ -223,6 +299,12 @@ namespace AsynCUDA12.Runtime
 
 
 		// Accessors (single)
+		/// <summary>
+		/// Uploads a sequence of host data to the device as a single buffer.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="data">The host data to upload.</param>
+		/// <returns>The registered <see cref="CudaMem"/>, or <c>null</c> if the service is offline or the upload fails.</returns>
 		public CudaMem? PushData<T>(IEnumerable<T> data) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -234,6 +316,13 @@ namespace AsynCUDA12.Runtime
 			return this.Register.PushData(data);
 		}
 
+		/// <summary>
+		/// Downloads a single device buffer back to the host.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="indexPointer">The native handle of the buffer to read.</param>
+		/// <param name="keepBuffer">If <c>true</c>, the device memory is retained after the copy.</param>
+		/// <returns>The downloaded host array, or <c>null</c> if the service is offline.</returns>
 		public T[]? PullData<T>(nint indexPointer, bool keepBuffer = false) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -244,6 +333,13 @@ namespace AsynCUDA12.Runtime
 			return this.Register.PullData<T>(indexPointer, keepBuffer);
 		}
 
+		/// <summary>
+		/// Downloads the buffer described by the given memory object back to the host.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="mem">The memory object whose primary buffer should be read.</param>
+		/// <param name="keepBuffer">If <c>true</c>, the device memory is retained after the copy.</param>
+		/// <returns>The downloaded host array, or <c>null</c> if the service is offline.</returns>
 		public T[]? PullData<T>(CudaMem mem, bool keepBuffer = false) where T : unmanaged
 			{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -255,6 +351,12 @@ namespace AsynCUDA12.Runtime
 			return this.Register.PullData<T>(mem.IndexPointer, keepBuffer);
 		}	
 
+		/// <summary>
+		/// Allocates a single uninitialized device buffer.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type to allocate.</typeparam>
+		/// <param name="elementCount">The number of elements to allocate.</param>
+		/// <returns>The registered <see cref="CudaMem"/>, or <c>null</c> if the service is offline.</returns>
 		public CudaMem? AllocateSingle<T>(int elementCount) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -267,6 +369,12 @@ namespace AsynCUDA12.Runtime
 
 
 		// Accessors (group / chunks)
+		/// <summary>
+		/// Uploads several host data chunks to the device as a group of buffers.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="data">The collection of host data chunks to upload.</param>
+		/// <returns>The registered <see cref="CudaMem"/>, or <c>null</c> if the service is offline.</returns>
 		public CudaMem? PushChunks<T>(IEnumerable<T[]> data) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -278,6 +386,13 @@ namespace AsynCUDA12.Runtime
 			return this.Register.PushChunks(data);
 		}
 
+		/// <summary>
+		/// Downloads a grouped device allocation back to the host as separate chunks.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="indexPointer">The native handle of a buffer belonging to the allocation.</param>
+		/// <param name="keepBuffer">If <c>true</c>, the device memory is retained after the copy.</param>
+		/// <returns>The downloaded chunks, or <c>null</c> if the service is offline.</returns>
 		public IEnumerable<T[]>? PullChunks<T>(nint indexPointer, bool keepBuffer = false) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -288,6 +403,13 @@ namespace AsynCUDA12.Runtime
 			return this.Register.PullChunks<T>(indexPointer, keepBuffer);
 		}
 
+		/// <summary>
+		/// Downloads the grouped allocation described by the given memory object back to the host as separate chunks.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="mem">The memory object describing the grouped allocation.</param>
+		/// <param name="keepBuffer">If <c>true</c>, the device memory is retained after the copy.</param>
+		/// <returns>The downloaded chunks, or <c>null</c> if the service is offline.</returns>
 		public IEnumerable<T[]>? PullChunks<T>(CudaMem mem, bool keepBuffer = false) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -298,6 +420,12 @@ namespace AsynCUDA12.Runtime
 			return this.Register.PullChunks<T>(mem.IndexPointer, keepBuffer);
 		}
 
+		/// <summary>
+		/// Allocates a group of uninitialized device buffers (one per supplied length).
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type to allocate.</typeparam>
+		/// <param name="lengths">The element count for each buffer to allocate.</param>
+		/// <returns>The registered <see cref="CudaMem"/>, or <c>null</c> if the service is offline.</returns>
 		public CudaMem? AllocateGroup<T>(nint[] lengths) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -310,6 +438,12 @@ namespace AsynCUDA12.Runtime
 
 
 		// Accessors (single) ((async))
+		/// <summary>
+		/// Asynchronously uploads a sequence of host data to the device as a single buffer.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="data">The host data to upload.</param>
+		/// <returns>A task producing the registered <see cref="CudaMem"/>, or <c>null</c> if the service is offline.</returns>
 		public async Task<CudaMem?> PushDataAsync<T>(IEnumerable<T> data) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -321,6 +455,13 @@ namespace AsynCUDA12.Runtime
 			return await this.Register.PushDataAsync(data);
 		}
 
+		/// <summary>
+		/// Asynchronously downloads a single device buffer back to the host.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="indexPointer">The native handle of the buffer to read.</param>
+		/// <param name="keepBuffer">If <c>true</c>, the device memory is retained after the copy.</param>
+		/// <returns>A task producing the downloaded host array, or <c>null</c> if the service is offline.</returns>
 		public async Task<T[]?> PullDataAsync<T>(nint indexPointer, bool keepBuffer = false) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -331,6 +472,13 @@ namespace AsynCUDA12.Runtime
 			return await this.Register.PullDataAsync<T>(indexPointer, keepBuffer);
 		}
 
+		/// <summary>
+		/// Asynchronously downloads the buffer described by the given memory object back to the host.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="cudaMem">The memory object whose primary buffer should be read.</param>
+		/// <param name="keepBuffer">If <c>true</c>, the device memory is retained after the copy.</param>
+		/// <returns>A task producing the downloaded host array, or <c>null</c> if the service is offline.</returns>
 		public async Task<T[]?> PullDataAsync<T>(CudaMem cudaMem, bool keepBuffer = false) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -341,6 +489,12 @@ namespace AsynCUDA12.Runtime
 			return await this.Register.PullDataAsync<T>(cudaMem.IndexPointer, keepBuffer);
 		}
 
+		/// <summary>
+		/// Asynchronously allocates a single uninitialized device buffer.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type to allocate.</typeparam>
+		/// <param name="elementCount">The number of elements to allocate.</param>
+		/// <returns>A task producing the registered <see cref="CudaMem"/>, or <c>null</c> if the service is offline.</returns>
 		public async Task<CudaMem?> AllocateSingleAsync<T>(int elementCount) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -353,6 +507,12 @@ namespace AsynCUDA12.Runtime
 
 
 		// Accessors (group / chunks) ((async))
+		/// <summary>
+		/// Asynchronously uploads several host data chunks to the device as a group of buffers.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="data">The collection of host data chunks to upload.</param>
+		/// <returns>A task producing the registered <see cref="CudaMem"/>, or <c>null</c> if the service is offline.</returns>
 		public async Task<CudaMem?> PushChunksAsync<T>(IEnumerable<T[]> data) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -363,6 +523,13 @@ namespace AsynCUDA12.Runtime
 			return await this.Register.PushChunksAsync(data);
 		}
 
+		/// <summary>
+		/// Asynchronously downloads a grouped device allocation back to the host as separate chunks.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="indexPointer">The native handle of a buffer belonging to the allocation.</param>
+		/// <param name="keepBuffer">If <c>true</c>, the device memory is retained after the copy.</param>
+		/// <returns>A task producing the downloaded chunks, or <c>null</c> if the service is offline.</returns>
 		public async Task<IEnumerable<T[]>?> PullChunksAsync<T>(nint indexPointer, bool keepBuffer = false) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -373,6 +540,13 @@ namespace AsynCUDA12.Runtime
 			return await this.Register.PullChunksAsync<T>(indexPointer, keepBuffer);
 		}
 
+		/// <summary>
+		/// Asynchronously downloads the grouped allocation described by the given memory object back to the host as separate chunks.
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type of the data.</typeparam>
+		/// <param name="mem">The memory object describing the grouped allocation.</param>
+		/// <param name="keepBuffer">If <c>true</c>, the device memory is retained after the copy.</param>
+		/// <returns>A task producing the downloaded chunks, or <c>null</c> if the service is offline.</returns>
 		public async Task<IEnumerable<T[]>?> PullChunksAsync<T>(CudaMem mem, bool keepBuffer = false) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -383,6 +557,12 @@ namespace AsynCUDA12.Runtime
 			return await this.Register.PullChunksAsync<T>(mem.IndexPointer, keepBuffer);
 		}
 
+		/// <summary>
+		/// Asynchronously allocates a group of uninitialized device buffers (one per supplied length).
+		/// </summary>
+		/// <typeparam name="T">The unmanaged element type to allocate.</typeparam>
+		/// <param name="lengths">The element count for each buffer to allocate.</param>
+		/// <returns>A task producing the registered <see cref="CudaMem"/>, or <c>null</c> if the service is offline.</returns>
 		public async Task<CudaMem?> AllocateGroupAsync<T>(nint[] lengths) where T : unmanaged
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -395,6 +575,11 @@ namespace AsynCUDA12.Runtime
 
 
 		// Accessors (free)
+		/// <summary>
+		/// Frees the device memory described by the given memory object.
+		/// </summary>
+		/// <param name="mem">The memory object to free.</param>
+		/// <returns>The number of bytes freed, or 0 if the service is offline.</returns>
 		public long FreeMemory(CudaMem mem)
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -405,6 +590,11 @@ namespace AsynCUDA12.Runtime
 			return this.Register.FreeMemory(mem);
 		}
 
+		/// <summary>
+		/// Frees the device memory that owns the given native handle.
+		/// </summary>
+		/// <param name="indexPointer">The native handle of a buffer belonging to the allocation to free.</param>
+		/// <returns>The number of bytes freed, or 0 if the service is offline.</returns>
 		public long FreeMemory(nint indexPointer)
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -415,6 +605,11 @@ namespace AsynCUDA12.Runtime
 			return this.Register.FreeMemory(indexPointer);
 		}
 
+		/// <summary>
+		/// Frees the device memory of the allocation with the given id.
+		/// </summary>
+		/// <param name="id">The unique id of the allocation to free.</param>
+		/// <returns>The number of bytes freed, or 0 if the service is offline.</returns>
 		public long FreeMemory(Guid id)
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -425,6 +620,11 @@ namespace AsynCUDA12.Runtime
 			return this.Register.FreeMemory(id);
 		}
 
+		/// <summary>
+		/// Asynchronously frees the device memory of the allocation with the given id.
+		/// </summary>
+		/// <param name="id">The unique id of the allocation to free.</param>
+		/// <returns>A task producing the number of bytes freed, or 0 if the service is offline.</returns>
 		public async Task<long> FreeMemoryAsync(Guid id)
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
@@ -435,6 +635,11 @@ namespace AsynCUDA12.Runtime
 			return await Task.Run(() => this.Register.FreeMemory(id));
 		}
 
+		/// <summary>
+		/// Asynchronously frees the device memory that owns the given native handle.
+		/// </summary>
+		/// <param name="indexPointer">The native handle of a buffer belonging to the allocation to free.</param>
+		/// <returns>A task producing the number of bytes freed, or 0 if the service is offline.</returns>
 		public async Task<long> FreeMemoryAsync(nint indexPointer)
 		{
 			if (!this.Online || this.Context == null || this.Register == null)
